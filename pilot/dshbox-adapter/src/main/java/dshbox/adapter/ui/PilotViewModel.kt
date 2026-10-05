@@ -342,6 +342,78 @@ class PilotViewModel(
         refresh()
     }
 
+    /**
+     * 「真的开一次试试」—— **整页唯一一条会执行真实动作的路径**，且只能由用户点击触发。
+     *
+     * 走真闸门、一步不绕：把一条 v1 请求信封投进通道收件箱（与助手侧入口脚本同一形状），
+     * 宿主的工作循环认领它 → 协调器 → `InterlockGate` → `DirectBackend`。
+     * 判据名（`no_state_change`）不在回包正文里，由 [RulesDemo.decisionFrom] 从**授权记录**
+     * 里按请求号读出来（`RelayContainer.diagnostics().auditLines`，与诊断页同源）。
+     *
+     * 三道闸都在这里：
+     * 1. 白名单 + 复算结论（[RulesDemo.canReallyOpen]）—— 不满足就**根本不发**；
+     * 2. 参数先过后端同一把尺子（`IntentTemplates.validate`，在 [RulesDemoRunner.sendTemplate] 里）；
+     * 3. 回执若是"等待同意"，**立即停手**并把那张已经挂上的框收掉（DENY），按「会弹卡」呈现
+     *    —— 设计上不该走到这里（按钮只对免弹条目开放），这是最后一道保险，不是免弹的依据。
+     *
+     * 真开成功之后等 [HOST_RETURN_DELAY_MS] 再走 `app.launch` 把宿主拉回前台（那条形状在闸门里
+     * 是 `host_bring_to_front` 豁免，不问人、与档位无关）：用户先看清"系统页真的被摆出来了"，
+     * 再回到这一页看回执。
+     */
+    internal fun simulateRunOnce(
+        template: String,
+        hostPackage: String,
+        onDone: (RulesDemoRunner.Outcome, String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val currentRaw = state.value.settingRows
+                .firstOrNull { it.spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES }?.value.orEmpty()
+            val args = RulesDemo.sampleArgs(template, hostPackage)
+            if (args == null || !RulesDemo.canReallyOpen(template, currentRaw)) {
+                onDone(
+                    RulesDemoRunner.Outcome(
+                        requestId = "",
+                        ok = false,
+                        timedOut = false,
+                        errorCode = "E_DEMO_NOT_WHITELISTED",
+                        note = "这一条不在「真的开一次」的范围内（只开放给那 6 条内置的只上屏动作，" +
+                            "且此刻要在免问清单里）——没有发出去。",
+                    ),
+                    null,
+                )
+                return@launch
+            }
+            // 通道没在跑就**不发**：投进去也没人认领，只会变成一条到点作废的请求，
+            // 用户还白等一轮超时。通道状态与状态卡读的是同一处（`mailbox.isRunning`）。
+            if (!state.value.channelRunning) {
+                onDone(
+                    RulesDemoRunner.Outcome(
+                        requestId = "",
+                        ok = false,
+                        timedOut = false,
+                        errorCode = "E_CHANNEL_DOWN",
+                        note = "通道没在跑：这一发投进去也没人认领，所以没有发出去。先把通道打开（状态卡里那颗）再试。",
+                    ),
+                    null,
+                )
+                return@launch
+            }
+            val outcome = RulesDemoRunner.sendTemplate(container.paths, template, args)
+            val decision = outcome.requestId
+                .takeIf { it.isNotEmpty() }
+                ?.let { RulesDemo.decisionFrom(container.diagnostics().auditLines, it) }
+            if (outcome.awaitingConsent) {
+                // 零 E_AWAITING_CONSENT 是设计目标；真出现了也不能把授权界面留在用户脸上。
+                container.pendingApproval.value?.let { container.resolveApproval(InterlockChoice.DENY, it.id) }
+            } else if (outcome.ok) {
+                delay(HOST_RETURN_DELAY_MS)
+                RulesDemoRunner.bringHostToFront(container.paths, hostPackage)
+            }
+            onDone(outcome, decision)
+            refresh()
+        }
+    }
+
     /** 用户看过「缺无障碍」那张框：收掉它，同一档现场不再重复弹。 */
     fun dismissAccessibilityNotice() {
         container.dismissAccessibilityNotice()
@@ -381,6 +453,12 @@ class PilotViewModel(
 
         /** 每 N 次节拍做一次全量：日志、记录与存储占用按 3 秒一档更新。 */
         private const val HEAVY_EVERY_TICKS = 3
+
+        /**
+         * 「真的开一次」成功之后的回前台延时：先让用户看清系统页真的被摆出来了，
+         * 再把宿主拉回来。加上一次 `app.launch` 的通道往返，仍在立项文档要求的 5s 内。
+         */
+        private const val HOST_RETURN_DELAY_MS = 2_500L
 
         fun factory(container: RelayContainer): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

@@ -52,6 +52,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     testImplementation(libs.junit)
+    // 「模拟运行一次」的判据单测要读 org.json（清单解码与授权记录行）；android.jar 的
+    // 同名类是抛异常的桩，与 interlock-relay-core 的测试同一条处置，版本也取同一个。
+    testImplementation("org.json:json:20240303")
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

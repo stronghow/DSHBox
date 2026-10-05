@@ -61,6 +61,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.AnnotatedString
@@ -78,7 +79,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dshbox.adapter.R
+import dshbox.adapter.surfaces.CardPalette
 import interlock.relay.core.protocol.CapabilityDescriptor
+import interlock.relay.core.protocol.CapabilityId
+import interlock.relay.core.protocol.CapabilityRegistry
 import interlock.relay.core.protocol.TierCeiling
 import interlock.relay.core.runtime.RelayContainer
 import interlock.relay.core.settings.RelaySettings
@@ -240,6 +245,12 @@ fun RulesPage(
         .firstOrNull { it.spec.id == RelaySettings.CONFIRM_MODE }
         ?.value ?: RelaySettings.CONFIRM_HOLD
 
+    /**
+     * 宿主自己的包名：只给「真的开一次」用（`app.info` 的示例对象 + 收尾把宿主拉回前台那一发）。
+     * 与 `app.launch` 的回前台豁免判据同源，不另抄别名。
+     */
+    val appPackage = LocalContext.current.packageName
+
     // 有草稿、且草稿与已存值不同 = 真的有未保存的更改。比较口径与控件里的编辑器逐字一致
     // （清单型按"一行一条"解码后再比，避免把格式差异当成"改过"）。
     val dirtyRows = edit.ids()
@@ -387,6 +398,8 @@ fun RulesPage(
                 captionRows = state.rows,
                 ceilingOverridesJson = { viewModel.ceilingOverridesJson() },
                 effectiveCeiling = { viewModel.effectiveCeiling(it) },
+                // 「真的开一次」的唯一入口：宿主包名在这里取一次（示例参数与回前台那一发都用它）。
+                onSimulateRun = { template, onDone -> viewModel.simulateRunOnce(template, appPackage, onDone) },
                 confirmMode = confirmMode,
                 flashId = flashId,
             )
@@ -498,6 +511,7 @@ private fun GroupCard(
     captionRows: List<RelayContainer.CapabilityRow>,
     ceilingOverridesJson: () -> String,
     effectiveCeiling: (CapabilityDescriptor) -> String,
+    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
     confirmMode: String,
     flashId: String?,
 ) {
@@ -568,6 +582,7 @@ private fun GroupCard(
                         captionRows = captionRows,
                         ceilingOverridesJson = ceilingOverridesJson,
                         effectiveCeiling = effectiveCeiling,
+                        onSimulateRun = onSimulateRun,
                         confirmMode = confirmMode,
                         flashId = flashId,
                     )
@@ -716,6 +731,8 @@ private fun SettingRowItem(
     captionRows: List<RelayContainer.CapabilityRow>,
     ceilingOverridesJson: () -> String,
     effectiveCeiling: (CapabilityDescriptor) -> String,
+    /** 「真的开一次试试」的入口（[RulesDemo] 判过白名单与结论之后才会用上它）。 */
+    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
     confirmMode: String,
     flashId: String?,
 ) {
@@ -1036,6 +1053,7 @@ private fun SettingRowItem(
                         captionRows = captionRows,
                         ceilingOverridesJson = ceilingOverridesJson,
                         effectiveCeiling = effectiveCeiling,
+                        onSimulateRun = onSimulateRun,
                         confirmMode = confirmMode,
                         flashId = flashId,
                     )
@@ -1076,6 +1094,7 @@ private fun SettingRowItem(
             spec = spec,
             currentRaw = row.value,
             currentDisplay = valueSummary(row),
+            onSimulateRun = onSimulateRun,
             onSatisfied = {
                 simulateOpen = false
                 onNotice("好，就按这个来。这一项没有任何改动，刚才那一屏也没有执行任何系统动作。")
@@ -1225,6 +1244,7 @@ private fun SimulateDialog(
     spec: RelaySettings.Spec,
     currentRaw: String,
     currentDisplay: String,
+    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
     onSatisfied: () -> Unit,
     onAdjust: () -> Unit,
 ) {
@@ -1278,6 +1298,12 @@ private fun SimulateDialog(
             }
         }
 
+        // ── P1（C+D）：免问清单那一项另给一块**逐条真判定**与"会弹卡"那张卡的示意 ──
+        // 只对这一项出现：其余配置没有"逐条"这回事，硬塞一块只会让演示变长。
+        if (spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES) {
+            ScreenOnlyDemoBlock(currentRaw = currentRaw, onRunOnce = onSimulateRun)
+        }
+
         Surface(
             shape = MaterialTheme.shapes.small,
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1295,6 +1321,408 @@ private fun SimulateDialog(
         ) {
             Button(onClick = onSatisfied) { Text("满意，就这样") }
             TextButton(onClick = onAdjust) { Text("再改改") }
+        }
+    }
+}
+
+/**
+ * 免问清单的「逐条真判定」（P1 · C 方案）与「会弹卡」那张卡的示意（P1 · D 方案）。
+ *
+ * 结论**不是写死的文案**：每一条都拿 [RulesDemo] 按此刻的清单复算 —— 判据与真闸门同源
+ * （`InterlockGate.kt:135` 的 `no_state_change` 捷径 + `IntentTemplates.isNoStateChange`），
+ * 取值就是你此刻的 `approval.screen_only_templates`。所以"演示里说的"与"以后真发生的"
+ * 不会漂移：回去改一枚标签，再点开这一屏，结论跟着变。
+ *
+ * 三条硬边界（写在这里，也逐条写在卡片上）：
+ * 1. **零建屏**：这一块没有任何 `surface.virtual` 调用，也不碰屏号；
+ * 2. **零写设置**：看演示不写任何配置（写入仍只有"点标签"那一条既有路径）；
+ * 3. 「真的开一次」**只对那 6 条硬编码白名单开放**（[RulesDemo.TEMPLATES]），
+ *    并且只有复算结论为"不会弹卡"时才渲染那颗按钮；多出来的条目（`alarm.set` /
+ *    用户自造的名字）只给一行说明与一张卡的示意，绝不试跑。
+ */
+@Composable
+private fun ScreenOnlyDemoBlock(
+    currentRaw: String,
+    onRunOnce: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+) {
+    val items = RulesDemo.items(currentRaw)
+    val hostPackage = LocalContext.current.packageName
+    // 「会弹卡」那张卡的示意：默认收起，按需展开一行（渐进式披露，与全页一致）。
+    var previewFor by remember { mutableStateOf<String?>(null) }
+    // 正在真开的那一条。同一时刻只开放一条（通道本身也是串行执行的）。
+    var running by remember { mutableStateOf<String?>(null) }
+    val results = remember { mutableStateMapOf<String, Pair<RulesDemoRunner.Outcome, String?>>() }
+
+    Text(
+        text = "逐条真判定 · 你此刻这份清单",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 16.dp),
+    )
+    Text(
+        text = "下面每一条的结论都是当场算的，不是写好的词：判据是闸门里那条 no_state_change 捷径" +
+            "（闸门只认 sys.intent 的模板名 + 它此刻在读的那份免问清单），取值就是你现在的 " +
+            "approval.screen_only_templates。「不会弹卡」＝这一发现在会直接上屏；「会弹卡」＝会先弹一张卡问你。",
+        style = MaterialTheme.typography.bodySmall,
+        lineHeight = 20.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp),
+    )
+
+    items.forEach { item ->
+        RulesDemoRow(
+            item = item,
+            hostPackage = hostPackage,
+            previewOpen = previewFor == item.template,
+            onTogglePreview = {
+                previewFor = if (previewFor == item.template) null else item.template
+            },
+            running = running == item.template,
+            // 只开放给白名单 ∩ 复算为"不会弹卡"的那几条；其余一律没有这颗按钮。
+            onRun = {
+                running = item.template
+                onRunOnce(item.template) { outcome, decision ->
+                    results[item.template] = outcome to decision
+                    running = null
+                }
+            },
+            canRun = item.runsForReal && running == null,
+            result = results[item.template],
+        )
+    }
+
+    // ── 判据边界：三个必须说清的事实（立项文档 §3），不是免责声明 ──
+    Text(
+        text = "判据边界（这三件事也要一起知道）",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 14.dp),
+    )
+    listOf(
+        "① 目标是系统授权界面时，一律当场弹卡问你 —— 与这份清单无关（那条判据在闸门里排在所有豁免之前）。",
+        "② 这条能力（sys.intent）的档位被拨成「禁止」时仍然会被挡下：免问清单救不了它，" +
+            "助手的回执是 E_GATE_HOST_DENIED（闸门里那一条 tier_denied）。",
+        "③ 清单是你可以编辑的集合：多出来的名字（比如 alarm.set，或你自己写的名字）也会免弹，" +
+            "所以上面照实算；但「真的开一次」只对那 6 条内置的只上屏动作开放，别的名字只画卡、不试跑。",
+    ).forEach { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
+            lineHeight = 19.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+/** 一条动作在演示里的一行：结论 + 依据（＋可选的真开按钮 / 卡示意 / 回执）。 */
+@Composable
+private fun RulesDemoRow(
+    item: RulesDemo.Item,
+    hostPackage: String,
+    previewOpen: Boolean,
+    onTogglePreview: () -> Unit,
+    running: Boolean,
+    canRun: Boolean,
+    onRun: () -> Unit,
+    result: Pair<RulesDemoRunner.Outcome, String?>?,
+) {
+    val accent = if (item.quiet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Text(
+                text = item.template,
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "（${item.label}）" + if (item.extra) " · 清单里多出来的条目" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = if (item.quiet) "● 不会弹卡" else "● 会弹卡",
+                style = MaterialTheme.typography.bodyMedium,
+                color = accent,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Text(
+                // 依据就是判据本身：命中哪一条，明写出来。
+                text = if (item.quiet) {
+                    "依据：它在这份免问清单里 ⇒ 命中闸门里那条 no_state_change 捷径，直接执行。"
+                } else {
+                    "依据：它不在免问清单里 ⇒ 走档位判定；档位不是「完全访问」时先弹卡问你。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            if (item.disagrees) {
+                // 只可能是"页面读到的清单比闸门手里的快照旧"：如实说，并以闸门为准。
+                Text(
+                    text = "⚠ 这一页读到的清单与闸门此刻手里的快照不一致（页面值可能刚被改过还没刷新）——" +
+                        "上面的结论按闸门口径给。",
+                    style = MaterialTheme.typography.labelSmall,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            if (item.extra) {
+                Text(
+                    text = if (item.template == IntentTemplates.ALARM_SET || item.template == IntentTemplates.TIMER_SET) {
+                        "⚠ 不在演示范围：这一条会真的建出闹钟 / 计时器，演示不试跑它。"
+                    } else {
+                        "⚠ 不在演示范围：这一条不是内置的只上屏动作，我们无法确认它只上屏，演示不试跑它。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+
+            if (item.runsForReal) {
+                // 唯一一颗会执行真实动作的按钮：⚡ + 测试蓝，与「模拟运行一次」同一套壳与色。
+                if (running) {
+                    Text(
+                        text = "正在真发这一发…（最多等 12 秒）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                } else if (canRun) {
+                    DashedActionButton(
+                        onClick = onRun,
+                        icon = "⚡",
+                        pill = true,
+                        tint = testInk(),
+                        modifier = Modifier.padding(top = 8.dp),
+                    ) { Text("真的开一次试试") }
+                } else {
+                    // 同一时刻只发一条：另一条还在等回执时，这一条**不渲染按钮**（虚线框按钮没有禁用态）。
+                    Text(
+                        text = "另一条正在真发…等它回执之后再试这一条。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                Text(
+                    text = "它是真发（走真闸门 → 真 sys.intent）：你会被真的带到那个页面，2～3 秒后自动回到这一页。" +
+                        "示例参数：" + (RulesDemo.sampleDetail(item.template, hostPackage) ?: "这一发不需要参数"),
+                    style = MaterialTheme.typography.labelSmall,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+                result?.let { (outcome, decision) -> DemoRunReceipt(outcome = outcome, decision = decision) }
+            } else if (!item.quiet) {
+                PilotSmallChip(onClick = onTogglePreview, modifier = Modifier.padding(top = 8.dp)) {
+                    Text(if (previewOpen) "收起这张卡 ▴" else "会弹卡：看看这张卡长什么样 ▾")
+                }
+            }
+
+            if (previewOpen) {
+                ApprovalCardPreview(template = item.template, hostPackage = hostPackage)
+            }
+        }
+    }
+}
+
+/**
+ * 「真的开一次」的回执（人话）。**零 E_AWAITING_CONSENT 是设计目标**，所以"等待同意"那一支
+ * 不是正常分支：真出现了就如实说"与预告不一致"，并按「会弹卡」呈现。
+ */
+@Composable
+private fun DemoRunReceipt(outcome: RulesDemoRunner.Outcome, decision: String?) {
+    val awaiting = outcome.awaitingConsent
+    val text: String
+    val color: Color
+    when {
+        awaiting -> {
+            text = "⚠ 回执是「等你同意」（E_AWAITING_CONSENT）—— 与预告不一致：这一发其实会弹卡。" +
+                "已经停手，并把那张框收掉（按「会弹卡」呈现），不再继续。"
+            color = MaterialTheme.colorScheme.error
+        }
+
+        outcome.ok -> {
+            val resolver = if (outcome.viaResolver) "（这一发走了系统选择器）" else ""
+            val landed = outcome.resolvedPackage?.let { "；由 $it 接的" } ?: ""
+            text = "✅ 真发出去了。闸门判据：" + (decision ?: "见授权记录") + landed + resolver
+            color = MaterialTheme.colorScheme.primary
+        }
+
+        outcome.timedOut -> {
+            text = "⚠ 没等到回执（通道可能在忙、也可能没在跑）。界面不重发：" +
+                "请求会按有效期在宿主侧收场。可以到「运行日志 / 授权记录」里看这一条的下场。"
+            color = MaterialTheme.colorScheme.error
+        }
+
+        else -> {
+            text = "✗ 没发出去：" + (outcome.note ?: "没有更多信息") +
+                (outcome.errorCode?.let { "（$it）" } ?: "")
+            color = MaterialTheme.colorScheme.error
+        }
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        lineHeight = 17.sp,
+        color = color,
+        modifier = Modifier.padding(top = 6.dp),
+    )
+    if (outcome.ok) {
+        Text(
+            // 成功回包里的 note 是后端那句"交给了谁"，它只说交接发生了、不说用户接下来做了什么。
+            text = "后端说明：" + (outcome.note ?: "（无）") +
+                "。注意它只说明「这一发交给了系统」，不代表你在那个页面上做了什么。",
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/**
+ * 「会弹卡」那张卡的**示意**（D 方案）：按真卡的结构与配色画出来，**不是新造一套视觉** ——
+ * 色值取自真卡自己那份 [CardPalette]（悬浮卡与页内卡共用同一处），文案取同一批字符串资源，
+ * 字段顺序与 `ApprovalCardView` 一致：标题行 / 「<能力>，允许吗？」/ 操作对象 / 写入内容 /
+ * 风险一句话 / 倒计时线 / 拒绝 + 允许 / 本会话内允许。
+ *
+ * 为什么不在 Compose 里直接挂那个 Android View：它长在可滚动容器的中间，
+ * AndroidView 在无穷高约束下没有可用的量法。所以这里是"照同一份色与同一批话画一遍"，
+ * 与真卡逐项对齐；**同时它整块不可点**（按钮只是画出来的，避免"点了没反应"）。
+ */
+@Composable
+private fun ApprovalCardPreview(template: String, hostPackage: String) {
+    val night = isSystemInDarkTheme()
+    val cardColor = Color(CardPalette.cardColor(night))
+    val textColor = Color(CardPalette.textColor(night))
+    val subColor = Color(CardPalette.subColor(night))
+    val lineColor = Color(CardPalette.lineColor(night))
+    // 真卡上那行标题就是这条能力的标题（`ApprovalPrompt.titleRes`）。
+    val capTitle = CapabilityRegistry.find(CapabilityId.SYS_INTENT)?.titleRes
+        ?.let { stringResource(it) } ?: "系统语义入口"
+    val detail = RulesDemo.sampleDetail(template, hostPackage)
+
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = cardColor,
+            border = BorderStroke(1.dp, lineColor),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(6.dp).background(subColor, CircleShape))
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = stringResource(R.string.pilot_page_overview),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = subColor,
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.pilot_overlay_asking, capTitle),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = textColor,
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+                Text(
+                    text = stringResource(R.string.pilot_approval_target),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = subColor,
+                    modifier = Modifier.padding(top = 14.dp),
+                )
+                Text(text = template, style = MaterialTheme.typography.bodyMedium, color = textColor)
+                if (detail != null) {
+                    Text(
+                        text = stringResource(R.string.pilot_approval_detail),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = subColor,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                    Text(text = detail, style = MaterialTheme.typography.bodyMedium, color = textColor)
+                }
+                // sys.intent 的风险档是「低」（`InterlockGate.riskOf` 的 else 分支），
+                // 这一句与真卡读的是同一条资源（core 的 relay_risk_low）。
+                Text(
+                    text = stringResource(interlock.relay.core.R.string.relay_risk_low),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = subColor,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp)
+                        .height(2.dp)
+                        .background(lineColor),
+                )
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 18.dp)) {
+                    PreviewPill(
+                        label = stringResource(R.string.pilot_approval_deny),
+                        fill = Color.Transparent,
+                        stroke = lineColor,
+                        ink = subColor,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    PreviewPill(
+                        label = stringResource(R.string.pilot_overlay_allow),
+                        // 与真卡逐字同一对角：夜间浅底压深墨，白天深底压白字（`ApprovalCardView` :251-252）。
+                        fill = if (night) Color(CardPalette.inkDark) else Color(CardPalette.inkLight),
+                        stroke = null,
+                        ink = if (night) Color(CardPalette.inkLight) else Color.White,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                PreviewPill(
+                    // sys.intent 的上限是 ANY ⇒ 真卡上会有这一颗（`allowsSessionGrant`）。
+                    label = stringResource(R.string.pilot_approval_allow_session),
+                    fill = Color.Transparent,
+                    stroke = lineColor,
+                    ink = subColor,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+            }
+        }
+        Text(
+            text = "真跑时你看到的就是这张卡（悬浮卡 / 通知卡 / 页内卡是同一张卡）：这里只是画出来的样子，" +
+                "整块点不动、也不会去触发它。上面那颗「真的开一次试试」才是真发。",
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+/** 示意卡上的一颗胶囊按钮：只画样子，不可点（避免"点了没反应"）。 */
+@Composable
+private fun PreviewPill(
+    label: String,
+    fill: Color,
+    stroke: Color?,
+    ink: Color,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = RoundedCornerShape(23.dp),
+        color = fill,
+        border = stroke?.let { BorderStroke(1.dp, it) },
+        modifier = modifier.height(46.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(text = label, style = MaterialTheme.typography.labelLarge, color = ink)
         }
     }
 }
