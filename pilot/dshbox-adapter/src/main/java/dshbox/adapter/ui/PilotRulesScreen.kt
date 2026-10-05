@@ -81,6 +81,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import dshbox.adapter.R
 import dshbox.adapter.surfaces.CardPalette
+import interlock.relay.core.protocol.AccessTier
 import interlock.relay.core.protocol.CapabilityDescriptor
 import interlock.relay.core.protocol.CapabilityId
 import interlock.relay.core.protocol.CapabilityRegistry
@@ -1094,6 +1095,11 @@ private fun SettingRowItem(
             spec = spec,
             currentRaw = row.value,
             currentDisplay = valueSummary(row),
+            // 档位直接取界面自己那份能力行（`CapabilityRow.state.tier`，与闸门同一个 TierStore），
+            // 不另开一条读法、也不为演示多读一次内核状态。
+            sysIntentTier = captionRows
+                .firstOrNull { it.descriptor.id == CapabilityId.SYS_INTENT }
+                ?.state?.tier ?: AccessTier.ASK,
             onSimulateRun = onSimulateRun,
             onSatisfied = {
                 simulateOpen = false
@@ -1244,6 +1250,8 @@ private fun SimulateDialog(
     spec: RelaySettings.Spec,
     currentRaw: String,
     currentDisplay: String,
+    /** 这条能力此刻的档位（界面自己已经读到的能力行；读不到时按默认「每次询问」兜底）。 */
+    sysIntentTier: AccessTier,
     onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
     onSatisfied: () -> Unit,
     onAdjust: () -> Unit,
@@ -1301,7 +1309,11 @@ private fun SimulateDialog(
         // ── P1（C+D）：免问清单那一项另给一块**逐条真判定**与"会弹卡"那张卡的示意 ──
         // 只对这一项出现：其余配置没有"逐条"这回事，硬塞一块只会让演示变长。
         if (spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES) {
-            ScreenOnlyDemoBlock(currentRaw = currentRaw, onRunOnce = onSimulateRun)
+            ScreenOnlyDemoBlock(
+                currentRaw = currentRaw,
+                tier = sysIntentTier,
+                onRunOnce = onSimulateRun,
+            )
         }
 
         Surface(
@@ -1343,9 +1355,10 @@ private fun SimulateDialog(
 @Composable
 private fun ScreenOnlyDemoBlock(
     currentRaw: String,
+    tier: AccessTier,
     onRunOnce: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
 ) {
-    val items = RulesDemo.items(currentRaw)
+    val items = RulesDemo.items(currentRaw, tier)
     val hostPackage = LocalContext.current.packageName
     // 「会弹卡」那张卡的示意：默认收起，按需展开一行（渐进式披露，与全页一致）。
     var previewFor by remember { mutableStateOf<String?>(null) }
@@ -1360,9 +1373,11 @@ private fun ScreenOnlyDemoBlock(
         modifier = Modifier.padding(top = 16.dp),
     )
     Text(
-        text = "下面每一条的结论都是当场算的，不是写好的词：判据是闸门里那条 no_state_change 捷径" +
+        text = "下面每一条的结论都是当场算的，不是写好的词：主判据是闸门里那条 no_state_change 捷径" +
             "（闸门只认 sys.intent 的模板名 + 它此刻在读的那份免问清单），取值就是你现在的 " +
-            "approval.screen_only_templates。「不会弹卡」＝这一发现在会直接上屏；「会弹卡」＝会先弹一张卡问你。",
+            "approval.screen_only_templates；另外按闸门的真实顺序带上档位一起算 —— " +
+            "档位「禁止」最先挡下，档位「完全访问」时清单里没有它也不会弹。" +
+            "「不会弹卡」＝这一发现在会直接上屏；「会弹卡」＝会先弹一张卡问你。",
         style = MaterialTheme.typography.bodySmall,
         lineHeight = 20.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1400,10 +1415,13 @@ private fun ScreenOnlyDemoBlock(
     )
     listOf(
         "① 目标是系统授权界面时，一律当场弹卡问你 —— 与这份清单无关（那条判据在闸门里排在所有豁免之前）。",
-        "② 这条能力（sys.intent）的档位被拨成「禁止」时仍然会被挡下：免问清单救不了它，" +
-            "助手的回执是 E_GATE_HOST_DENIED（闸门里那一条 tier_denied）。",
+        "② 档位与清单谁大：档位被拨成「禁止」时，免问清单救不了它（闸门里那一条 tier_denied，" +
+            "回执 E_GATE_HOST_DENIED）；档位是「完全访问」时，清单里没有的名字也不会弹。" +
+            "同一处还有两个输入这一页读不到，也不替它们猜：上限被收紧成「只在会话内」，" +
+            "以及你刚在别的卡上按过「本会话内允许」—— 那两种情况下，上面写「会弹卡」的也未必会弹。",
         "③ 清单是你可以编辑的集合：多出来的名字（比如 alarm.set，或你自己写的名字）也会免弹，" +
-            "所以上面照实算；但「真的开一次」只对那 6 条内置的只上屏动作开放，别的名字只画卡、不试跑。",
+            "所以上面照实算；但「真的开一次」只对那 6 条内置的只上屏动作开放，别的名字一律不试跑" +
+            "（排在「会弹卡」那一支的，还会给你看一张卡的示意 —— 那只是张画，点了不会发）。",
     ).forEach { line ->
         Text(
             text = line,
@@ -1428,6 +1446,24 @@ private fun RulesDemoRow(
     result: Pair<RulesDemoRunner.Outcome, String?>?,
 ) {
     val accent = if (item.quiet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+    val headline = when (item.conclusion) {
+        RulesDemo.Conclusion.QUIET_BY_LIST -> "● 不会弹卡（免问清单放行）"
+        RulesDemo.Conclusion.QUIET_BY_TIER -> "● 不会弹卡（档位是完全访问）"
+        RulesDemo.Conclusion.PROMPTS -> "● 会弹卡"
+        RulesDemo.Conclusion.BLOCKED -> "● 会被挡下（档位是禁止）"
+    }
+    val basis = when (item.conclusion) {
+        RulesDemo.Conclusion.QUIET_BY_LIST ->
+            "依据：它在这份免问清单里 ⇒ 命中闸门里那条 no_state_change 捷径，直接执行。"
+        RulesDemo.Conclusion.QUIET_BY_TIER ->
+            "依据：它不在免问清单里，但这能力的档位是「完全访问」⇒ 闸门走档位判定那条路" +
+                "（那条的判据名是 auto），与免问清单无关。"
+        RulesDemo.Conclusion.PROMPTS ->
+            "依据：不在免问清单里，档位也不是「完全访问」⇒ 先弹一张卡问你。"
+        RulesDemo.Conclusion.BLOCKED ->
+            "依据：这条能力的档位是「禁止」⇒ 当场挡下（判据名 tier_denied，回执是 " +
+                "E_GATE_HOST_DENIED），弹卡都轮不到。"
+    }
     Surface(
         shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1441,23 +1477,20 @@ private fun RulesDemoRow(
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "（${item.label}）" + if (item.extra) " · 清单里多出来的条目" else "",
+                text = "（${item.label}）· 档位：" + tierLabel(item.tier) +
+                    if (item.extra) " · 清单里多出来的条目" else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = if (item.quiet) "● 不会弹卡" else "● 会弹卡",
+                text = headline,
                 style = MaterialTheme.typography.bodyMedium,
                 color = accent,
                 modifier = Modifier.padding(top = 4.dp),
             )
             Text(
-                // 依据就是判据本身：命中哪一条，明写出来。
-                text = if (item.quiet) {
-                    "依据：它在这份免问清单里 ⇒ 命中闸门里那条 no_state_change 捷径，直接执行。"
-                } else {
-                    "依据：它不在免问清单里 ⇒ 走档位判定；档位不是「完全访问」时先弹卡问你。"
-                },
+                // 依据就是判据本身：走的是哪一步、判据名叫什么，明写出来。
+                text = basis,
                 style = MaterialTheme.typography.labelSmall,
                 lineHeight = 17.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1523,7 +1556,7 @@ private fun RulesDemoRow(
                     modifier = Modifier.padding(top = 3.dp),
                 )
                 result?.let { (outcome, decision) -> DemoRunReceipt(outcome = outcome, decision = decision) }
-            } else if (!item.quiet) {
+            } else if (item.conclusion == RulesDemo.Conclusion.PROMPTS) {
                 PilotSmallChip(onClick = onTogglePreview, modifier = Modifier.padding(top = 8.dp)) {
                     Text(if (previewOpen) "收起这张卡 ▴" else "会弹卡：看看这张卡长什么样 ▾")
                 }

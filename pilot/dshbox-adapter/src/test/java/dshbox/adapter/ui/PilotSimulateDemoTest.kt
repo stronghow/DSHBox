@@ -1,6 +1,7 @@
 package dshbox.adapter.ui
 
 import interlock.relay.core.exec.direct.IntentTemplateCatalog
+import interlock.relay.core.protocol.AccessTier
 import interlock.relay.core.exec.direct.IntentTemplates
 import java.io.File
 import org.json.JSONArray
@@ -160,6 +161,32 @@ class PilotSimulateDemoTest {
             assertEquals(first, RulesDemo.items(raw))
             assertEquals(IntentTemplateCatalog.current(), before)
         }
+    }
+
+    @Test
+    fun `the tier takes part in the same order the gate checks it`() {
+        val list = listOf("settings.open")
+        install(list)
+        val raw = rawOf(list)
+        fun at(template: String, tier: AccessTier) =
+            RulesDemo.items(raw, tier).first { it.template == template }
+
+        // 档位=每次询问（默认）：清单里的走捷径，清单外的弹卡。
+        assertEquals(RulesDemo.Conclusion.QUIET_BY_LIST, at("settings.open", AccessTier.ASK).conclusion)
+        assertEquals(RulesDemo.Conclusion.PROMPTS, at("dial", AccessTier.ASK).conclusion)
+
+        // 档位=完全访问：清单外的也不弹 —— 但那是档位给的，不是免问清单，且不开放试跑。
+        val always = at("dial", AccessTier.ALWAYS)
+        assertEquals(RulesDemo.Conclusion.QUIET_BY_TIER, always.conclusion)
+        assertTrue("靠档位也确实是「不弹卡」", always.quiet)
+        assertFalse("但不是清单放行 ⇒ 不给真开按钮", always.runsForReal)
+        assertFalse(always.quietByList)
+
+        // 档位=禁止：清单里那条也挡下（闸门里 verdict 排在捷径之前）⇒ 一样没有按钮。
+        val denied = at("settings.open", AccessTier.DENIED)
+        assertEquals(RulesDemo.Conclusion.BLOCKED, denied.conclusion)
+        assertFalse(denied.quiet)
+        assertFalse(denied.runsForReal)
     }
 
     @Test
