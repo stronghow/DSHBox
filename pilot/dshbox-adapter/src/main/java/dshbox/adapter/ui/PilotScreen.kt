@@ -162,6 +162,8 @@ fun PilotScreen(container: RelayContainer, onBack: () -> Unit) {
             // 规则页"哪一组开着、哪一项的哪一块铺开了"同理：切到子页或别的页再回来，不该让用户
             // 重新点一遍。状态挂在这里而不是页内，理由与上一段的滚动位置完全一样。
             val rulesExpansion = remember { RulesExpansionMemory() }
+            // 编辑中还没保存的草稿同理：切页回来时它还在，顶部那条「有未保存的更改」才说得准。
+            val rulesEdit = remember { RulesEditMemory() }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -189,6 +191,7 @@ fun PilotScreen(container: RelayContainer, onBack: () -> Unit) {
                         viewModel = viewModel,
                         open = open,
                         expansion = rulesExpansion,
+                        edit = rulesEdit,
                     )
 
                     is PilotDestination.Detail -> DetailPage(
