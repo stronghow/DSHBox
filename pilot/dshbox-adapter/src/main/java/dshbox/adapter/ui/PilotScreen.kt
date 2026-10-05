@@ -159,6 +159,9 @@ fun PilotScreen(container: RelayContainer, onBack: () -> Unit) {
                 onDispose { scrollByPage[page] = pageScroll.value }
             }
             LaunchedEffect(page) { pageScroll.scrollTo(scrollByPage[page] ?: 0) }
+            // 规则页"哪一组开着、哪一项的哪一块铺开了"同理：切到子页或别的页再回来，不该让用户
+            // 重新点一遍。状态挂在这里而不是页内，理由与上一段的滚动位置完全一样。
+            val rulesExpansion = remember { RulesExpansionMemory() }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -185,6 +188,7 @@ fun PilotScreen(container: RelayContainer, onBack: () -> Unit) {
                         state = state,
                         viewModel = viewModel,
                         open = open,
+                        expansion = rulesExpansion,
                     )
 
                     is PilotDestination.Detail -> DetailPage(

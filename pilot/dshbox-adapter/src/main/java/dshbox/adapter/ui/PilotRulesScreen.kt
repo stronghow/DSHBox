@@ -1,5 +1,6 @@
 package dshbox.adapter.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,8 +34,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import interlock.relay.core.protocol.CapabilityDescriptor
 import interlock.relay.core.protocol.TierCeiling
 import interlock.relay.core.runtime.RelayContainer
@@ -48,13 +54,48 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** 一项配置里三块可展开内容的编号。三块互不牵连：展开「改了会怎样」不会带出例子，反之亦然。 */
+enum class RulesSection { DETAIL, EXAMPLE, EDITOR }
+
+/**
+ * 规则页的展开记忆：哪些组打开着、每一项的三块内容各自是否展开、危险组的"先看一眼代价"确认过没有。
+ *
+ * 与 [PilotScreen] 里记住每页滚动位置的 `scrollByPage` 同一个理由：切到别的页时这一页整个从组合里
+ * 摘掉，写在页内的 `remember` 活不过一次切页。把记忆交给外层 `remember`，滚动位置与展开状态就一起
+ * 活到离开这一页为止。默认：只有常用组打开；每一项三块全收起 —— 第一眼只看到"这项管什么 + 当前值"。
+ */
+class RulesExpansionMemory {
+    private val groups = mutableStateMapOf<RelaySettings.Group, Boolean>()
+    private val sections = mutableStateMapOf<String, Boolean>()
+
+    /** 危险组展开前的"先看一眼代价"是否已经确认。 */
+    var dangerUnlocked by mutableStateOf(false)
+
+    fun groupOpen(group: RelaySettings.Group): Boolean =
+        groups[group] ?: (group == RelaySettings.Group.COMMON)
+
+    fun setGroupOpen(group: RelaySettings.Group, open: Boolean) {
+        groups[group] = open
+    }
+
+    fun open(specId: String, section: RulesSection): Boolean =
+        sections[sectionKey(specId, section)] == true
+
+    fun toggle(specId: String, section: RulesSection) {
+        sections[sectionKey(specId, section)] = !open(specId, section)
+    }
+
+    private fun sectionKey(specId: String, section: RulesSection): String = "$specId#${section.name}"
+}
+
 /**
  * "规则与配置"页：整张页面由 [RelaySettings.all] 那张声明表渲染，不写死任何一项。
  *
  * 三条呈现纪律：
  * - 分组 + 一句话分组说明；高级与危险默认折叠，危险组展开前先看一屏说明。
- * - 每行先给"这是什么、当前值、是不是默认"，点开才展开"改了会怎样 / 默认为什么这样 /
- *   代价 / 影响范围 / 试一下"。信息不堆在第一眼，但一句都不少。
+ * - 每一项折叠态只有"标题 + 风险徽标 + 一句话作用 + 当前值"；长说明分成三块，用三个**明显可点**的
+ *   文字开关按需铺开：「改了会怎样」（含 默认为什么这样 / 代价 / 影响范围）、「看例子」、「改这一项」
+ *   （控件与恢复默认；危险项的子名单跟随它出现）。三块互不牵连，信息一句不少，只是不再同时占屏。
  * - 危险项要求**长按 3 秒**才写入：比对话框更能让人停一下，而且确认句里复述的是
  *   effect 与 risk 的原文，不是"确定/取消"。
  *
@@ -66,14 +107,12 @@ fun RulesPage(
     state: PilotUiState,
     viewModel: PilotViewModel,
     open: (PilotDestination) -> Unit,
+    expansion: RulesExpansionMemory,
 ) {
     // 改动回执：动词短语，人话。任何一次写入都从这里出一条。
     var receipt by remember { mutableStateOf<String?>(null) }
     var search by remember { mutableStateOf("") }
-    // 危险组是否已通过"进入前说明"。
-    var dangerUnlocked by remember { mutableStateOf(false) }
     var dangerIntro by remember { mutableStateOf(false) }
-    var expandedGroups by remember { mutableStateOf(setOf(RelaySettings.Group.COMMON)) }
     var exportText by remember { mutableStateOf<String?>(null) }
     var importOpen by remember { mutableStateOf(false) }
 
@@ -144,18 +183,19 @@ fun RulesPage(
             .filter { row -> matches(row, query) }
         // 搜索时把没有命中的组整组隐掉；不写早期 return，避免在可组合 lambda 里提前返回。
         if (query.isEmpty() || rows.isNotEmpty()) {
-            val expanded = group in expandedGroups || query.isNotEmpty()
+            val expanded = expansion.groupOpen(group) || query.isNotEmpty()
             GroupCard(
                 group = group,
                 rows = rows,
                 expanded = expanded,
+                expansion = expansion,
                 onToggle = {
                     if (expanded) {
-                        expandedGroups = expandedGroups - group
-                    } else if (group == RelaySettings.Group.DANGER && !dangerUnlocked) {
+                        expansion.setGroupOpen(group, false)
+                    } else if (group == RelaySettings.Group.DANGER && !expansion.dangerUnlocked) {
                         dangerIntro = true
                     } else {
-                        expandedGroups = expandedGroups + group
+                        expansion.setGroupOpen(group, true)
                     }
                 },
                 onResetGroup = {
@@ -198,9 +238,9 @@ fun RulesPage(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    dangerUnlocked = true
+                    expansion.dangerUnlocked = true
                     dangerIntro = false
-                    expandedGroups = expandedGroups + RelaySettings.Group.DANGER
+                    expansion.setGroupOpen(RelaySettings.Group.DANGER, true)
                 }) { Text("我明白，展开危险设置") }
             },
             dismissButton = {
@@ -238,6 +278,7 @@ private fun GroupCard(
     group: RelaySettings.Group,
     rows: List<RelayContainer.SettingRow>,
     expanded: Boolean,
+    expansion: RulesExpansionMemory,
     onToggle: () -> Unit,
     onResetGroup: () -> Unit,
     onApply: (String, String, String) -> Unit,
@@ -257,6 +298,7 @@ private fun GroupCard(
                 PilotGroupDivider()
                 SettingRowItem(
                     row = row,
+                    expansion = expansion,
                     onApply = { encoded, phrase -> onApply(row.spec.id, encoded, phrase) },
                     onReset = { onReset(row.spec.id) },
                     onOpenLink = onOpenLink,
@@ -286,9 +328,18 @@ private fun groupChangedSuffix(rows: List<RelayContainer.SettingRow>): String {
 
 // ─────────────────────────── 一行配置 ───────────────────────────
 
+/**
+ * 一项配置：折叠态只有"标题 + 风险徽标 + 一句话作用 + 当前值"，三块长内容各自按需展开。
+ *
+ * 上一版把六段说明与控件一次性铺在展开区里，而唯一的开关是"点整行"（没有任何可见的展开控件）——
+ * 想看一眼例子，代价是整页被撑满。这里把展开拆成三个**明显可点**的文字开关：
+ * 「改了会怎样」（effect / whyDefault / 代价 / 影响范围）、「看例子」（preview）、
+ * 「改这一项」（控件 + 恢复默认 + 危险项的子名单）。点哪块只铺哪块。
+ */
 @Composable
 private fun SettingRowItem(
     row: RelayContainer.SettingRow,
+    expansion: RulesExpansionMemory,
     onApply: (String, String) -> Unit,
     onReset: () -> Unit,
     onOpenLink: (PilotDestination) -> Unit,
@@ -298,119 +349,212 @@ private fun SettingRowItem(
     confirmMode: String,
 ) {
     val spec = row.spec
-    var expanded by remember { mutableStateOf(false) }
     // 危险开关的待确认值：null = 没有待确认的改动。放在这里而不是控件回调里，
     // 是因为弹窗必须在组合上下文里渲染，不能从一个普通事件回调里调用 @Composable。
     var pendingSwitch by remember { mutableStateOf<Boolean?>(null) }
+    // 当前值被折行截断时指个路：完整清单一律在「改这一项」里（集合型配置的编辑器逐条列出全部）。
+    var valueClipped by remember(spec.id) { mutableStateOf(false) }
 
     // 未接线项：值改了不生效。默认根本不会显示（见 RelayContainer.settingsRows），
     // 只有用户在「显示未接线项（开发预览）」里显式打开才会走到这里 —— 那时顶上必须有一句
     // 醒目的黄色说明，不能让用户以为"我改了但程序没反应"。
     if (!spec.wired) UnwiredNotice()
 
+    // ── 折叠态：标题与风险徽标同行（徽标不进正文），下面是一句话作用与当前值 ──
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .pointerInput(spec.id) { detectTapGestures(onTap = { expanded = !expanded }) }
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(spec.title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = "当前：${row.display}" + if (row.isDefault) "（默认）" else "（已改）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            text = spec.title,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = riskChip(spec),
             style = MaterialTheme.typography.labelSmall,
             color = riskColor(spec),
         )
     }
+    Text(
+        text = spec.summary,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 21.sp,
+        modifier = Modifier.padding(top = 4.dp),
+    )
+    Text(
+        text = "当前：${row.display}" + if (row.isDefault) "（默认）" else "（已改）",
+        style = currentValueStyle(spec),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 19.sp,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { valueClipped = it.hasVisualOverflow },
+        modifier = Modifier.padding(top = 6.dp),
+    )
+    if (valueClipped) {
+        Text(
+            text = "（值太长只显示开头，点下面「改这一项」看完整清单）",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+    // 只读 / 未接线的说明跟在当前值后面：它说的是"这一项现在算不算数"，不该藏在展开区里。
+    row.readOnlyNote?.let {
+        Text(
+            text = it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            lineHeight = 19.sp,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
 
-    if (expanded) {
-        Text(spec.summary, style = MaterialTheme.typography.bodyMedium)
-        Spacer(modifier = Modifier.height(4.dp))
-        DetailLine("改了会怎样", spec.effect)
-        DetailLine("为什么默认这样", spec.whyDefault)
-        DetailLine("代价", "${spec.risk.label}风险 —— ${spec.riskText}")
-        DetailLine("影响范围", spec.scope)
-        DetailLine("试一下（不改配置）", spec.preview)
-        row.readOnlyNote?.let { DetailLine("说明", it) }
-
-        Spacer(modifier = Modifier.height(8.dp))
-        when (val type = spec.type) {
-            is RelaySettings.Type.Link -> {
-                Button(onClick = { onOpenLink(linkTarget(type.target)) }) { Text("打开这一页") }
-            }
-
-            is RelaySettings.Type.Switch -> {
-                val checked = row.value == "true"
-                Switch(
-                    checked = checked,
-                    enabled = spec.wired && !spec.locked,
-                    onCheckedChange = { next ->
-                        if (spec.holdToConfirm) {
-                            pendingSwitch = next
-                        } else {
-                            onApply(
-                                next.toString(),
-                                if (next) "已开启：${spec.title}" else "已关闭：${spec.title}",
-                            )
-                        }
-                    },
-                )
-            }
-
-            is RelaySettings.Type.Choice -> {
-                ChoiceControl(
-                    spec = spec,
-                    current = row.value,
-                    onApply = onApply,
-                    confirmMode = confirmMode,
-                )
-            }
-
-            is RelaySettings.Type.Number -> {
-                NumberControl(spec = spec, type = type, current = row.value, onApply = onApply)
-            }
-
-            is RelaySettings.Type.Text -> {
-                TextControl(spec = spec, type = type, current = row.value, onApply = onApply)
-            }
-
-            is RelaySettings.Type.TextList -> {
-                ListControl(spec = spec, current = row.value, onApply = onApply)
-            }
-
-            is RelaySettings.Type.Document -> when (type.kind) {
-                RelaySettings.Type.Document.Kind.INTENT_TEMPLATES -> TemplateDocumentEditor(
-                    spec = spec,
-                    current = row.value,
-                    onApply = onApply,
-                )
-
-                RelaySettings.Type.Document.Kind.SETTINGS_PAGES -> PageDocumentEditor(
-                    spec = spec,
-                    current = row.value,
-                    onApply = onApply,
-                )
-
-                RelaySettings.Type.Document.Kind.CEILING_OVERRIDES -> CeilingEditor(
-                    captionRows = captionRows,
-                    overridesJson = ceilingOverridesJson,
-                    effectiveCeiling = effectiveCeiling,
-                    onApply = onApply,
-                    confirmMode = confirmMode,
-                )
-            }
+    // ── 三个展开开关：各自独立、默认收起、颜色与正文分得开 ──
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionToggle(
+            label = "改了会怎样",
+            open = expansion.open(spec.id, RulesSection.DETAIL),
+            modifier = Modifier.weight(1f),
+        ) { expansion.toggle(spec.id, RulesSection.DETAIL) }
+        SectionToggle(
+            label = "看例子",
+            open = expansion.open(spec.id, RulesSection.EXAMPLE),
+            modifier = Modifier.weight(1f),
+        ) { expansion.toggle(spec.id, RulesSection.EXAMPLE) }
+        val link = spec.type as? RelaySettings.Type.Link
+        if (link != null) {
+            // 链接型项没有可编辑的值，本身就是一个入口：这一颗直接进那一页，比展开再点一下少一步。
+            SectionToggle(
+                label = "打开设置",
+                open = false,
+                modifier = Modifier.weight(1f),
+                arrow = "›",
+            ) { onOpenLink(linkTarget(link.target)) }
+        } else {
+            SectionToggle(
+                label = "改这一项",
+                open = expansion.open(spec.id, RulesSection.EDITOR),
+                modifier = Modifier.weight(1f),
+            ) { expansion.toggle(spec.id, RulesSection.EDITOR) }
         }
+    }
 
-        if (!row.isDefault && !spec.locked) {
-            Spacer(modifier = Modifier.height(6.dp))
-            TextButton(onClick = onReset) { Text("恢复默认") }
+    if (expansion.open(spec.id, RulesSection.DETAIL)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            DetailBlock("改了会怎样", spec.effect)
+            DetailBlock("为什么默认这样", spec.whyDefault)
+            DetailBlock("代价", "${spec.risk.label}风险 —— ${spec.riskText}")
+            DetailBlock("影响范围", spec.scope)
+        }
+    }
+
+    if (expansion.open(spec.id, RulesSection.EXAMPLE)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            DetailBlock("试一下（不改配置）", spec.preview)
+        }
+    }
+
+    if (expansion.open(spec.id, RulesSection.EDITOR)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            when (val type = spec.type) {
+                is RelaySettings.Type.Link -> {
+                    Button(onClick = { onOpenLink(linkTarget(type.target)) }) { Text("打开这一页") }
+                }
+
+                is RelaySettings.Type.Switch -> {
+                    val checked = row.value == "true"
+                    Switch(
+                        checked = checked,
+                        enabled = spec.wired && !spec.locked,
+                        onCheckedChange = { next ->
+                            if (spec.holdToConfirm) {
+                                pendingSwitch = next
+                            } else {
+                                onApply(
+                                    next.toString(),
+                                    if (next) "已开启：${spec.title}" else "已关闭：${spec.title}",
+                                )
+                            }
+                        },
+                    )
+                }
+
+                is RelaySettings.Type.Choice -> {
+                    ChoiceControl(
+                        spec = spec,
+                        current = row.value,
+                        onApply = onApply,
+                        confirmMode = confirmMode,
+                    )
+                }
+
+                is RelaySettings.Type.Number -> {
+                    NumberControl(spec = spec, type = type, current = row.value, onApply = onApply)
+                }
+
+                is RelaySettings.Type.Text -> {
+                    TextControl(spec = spec, type = type, current = row.value, onApply = onApply)
+                }
+
+                is RelaySettings.Type.TextList -> {
+                    ListControl(spec = spec, current = row.value, onApply = onApply)
+                }
+
+                is RelaySettings.Type.Document -> when (type.kind) {
+                    RelaySettings.Type.Document.Kind.INTENT_TEMPLATES -> TemplateDocumentEditor(
+                        spec = spec,
+                        current = row.value,
+                        onApply = onApply,
+                    )
+
+                    RelaySettings.Type.Document.Kind.SETTINGS_PAGES -> PageDocumentEditor(
+                        spec = spec,
+                        current = row.value,
+                        onApply = onApply,
+                    )
+
+                    RelaySettings.Type.Document.Kind.CEILING_OVERRIDES -> CeilingEditor(
+                        captionRows = captionRows,
+                        overridesJson = ceilingOverridesJson,
+                        effectiveCeiling = effectiveCeiling,
+                        onApply = onApply,
+                        confirmMode = confirmMode,
+                    )
+                }
+            }
+
+            if (!row.isDefault && !spec.locked) {
+                Spacer(modifier = Modifier.height(6.dp))
+                TextButton(onClick = onReset) { Text("恢复默认") }
+            }
+
+            // 危险项的子规则挂在父项"改这一项"展开之后（父项是"点系统授权框先问你"，
+            // 子项是它的三张名单）。它们属于父项的设置，不跟着两块说明展开。
+            row.children.forEach { child ->
+                PilotDivider()
+                SettingRowItem(
+                    row = child,
+                    expansion = expansion,
+                    onApply = onApply,
+                    onReset = onReset,
+                    onOpenLink = onOpenLink,
+                    captionRows = captionRows,
+                    ceilingOverridesJson = ceilingOverridesJson,
+                    effectiveCeiling = effectiveCeiling,
+                    confirmMode = confirmMode,
+                )
+            }
         }
     }
 
@@ -424,23 +568,6 @@ private fun SettingRowItem(
                 pendingSwitch = null
             },
         )
-    }
-
-    // 危险项的子规则挂在父项展开之后（父项是"点系统授权框先问你"，子项是它的三张名单）。
-    if (expanded) {
-        row.children.forEach { child ->
-            PilotDivider()
-            SettingRowItem(
-                row = child,
-                onApply = onApply,
-                onReset = onReset,
-                onOpenLink = onOpenLink,
-                captionRows = captionRows,
-                ceilingOverridesJson = ceilingOverridesJson,
-                effectiveCeiling = effectiveCeiling,
-                confirmMode = confirmMode,
-            )
-        }
     }
 }
 
@@ -471,16 +598,63 @@ private fun UnwiredNotice() {
     }
 }
 
+/**
+ * 一个明显的展开开关：文字 + ▾/▴（或给链接型的 ›）。主色、居中、点击热区撑满所在列。
+ *
+ * 用 labelMedium 而不是正文字号：三个开关要在一行里放得下，也不该比正文更抢眼。
+ */
 @Composable
-private fun DetailLine(label: String, text: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+private fun SectionToggle(
+    label: String,
+    open: Boolean,
+    modifier: Modifier = Modifier,
+    arrow: String? = null,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label + " " + (arrow ?: if (open) "▴" else "▾"),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+    )
+}
+
+/**
+ * 一段带小标题的说明：**小标题单独占一行**，正文另起一行、给足行高。
+ *
+ * 上一版把"标签："与正文塞进同一个 Row，长句一折行就与标签糊成一段 —— 那是"挤"的直接来源。
+ */
+@Composable
+private fun DetailBlock(label: String, text: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "$label：",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
         )
-        Text(text = text, style = MaterialTheme.typography.bodySmall)
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            lineHeight = 20.sp,
+            modifier = Modifier.padding(top = 3.dp),
+        )
     }
+}
+
+/**
+ * 当前值的字形：集合型配置的值是包名 / 动作名这类机器串，用等宽字体呈现（仍然正常折行），
+ * 免得一长串在卡片里糊成一片。其余类型保持正文字形。
+ */
+@Composable
+private fun currentValueStyle(spec: RelaySettings.Spec) = when (spec.type) {
+    is RelaySettings.Type.TextList ->
+        MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+    else -> MaterialTheme.typography.bodySmall
 }
 
 private fun riskChip(spec: RelaySettings.Spec): String =
@@ -762,6 +936,11 @@ private fun ListControl(
             value = text,
             onValueChange = { text = it; error = null },
             singleLine = false,
+            // 清单里是包名 / 动作名这类机器串：等宽 + 折行，长条目不会撑爆卡片。
+            textStyle = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 20.sp,
+            ),
             modifier = Modifier.fillMaxWidth().height(140.dp),
         )
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
@@ -809,8 +988,9 @@ private fun TemplateDocumentEditor(
                     )
                     Text(
                         "${template.id} → ${template.action}",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 19.sp,
                     )
                 }
                 TextButton(onClick = { draft = TemplateDraft.of(template) }) { Text("编辑") }
@@ -868,8 +1048,9 @@ private fun PageDocumentEditor(
                     Text(page.name, style = MaterialTheme.typography.bodyMedium)
                     Text(
                         "${page.key} → ${page.action}",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 19.sp,
                     )
                 }
                 TextButton(onClick = { draft = PageDraft.of(page) }) { Text("编辑") }
