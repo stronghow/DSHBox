@@ -299,8 +299,8 @@ private fun GroupCard(
                 SettingRowItem(
                     row = row,
                     expansion = expansion,
-                    onApply = { encoded, phrase -> onApply(row.spec.id, encoded, phrase) },
-                    onReset = { onReset(row.spec.id) },
+                    onApply = onApply,
+                    onReset = onReset,
                     onOpenLink = onOpenLink,
                     captionRows = captionRows,
                     ceilingOverridesJson = ceilingOverridesJson,
@@ -335,13 +335,17 @@ private fun groupChangedSuffix(rows: List<RelayContainer.SettingRow>): String {
  * 想看一眼例子，代价是整页被撑满。这里把展开拆成三个**明显可点**的文字开关：
  * 「改了会怎样」（effect / whyDefault / 代价 / 影响范围）、「看例子」（preview）、
  * 「改这一项」（控件 + 恢复默认 + 危险项的子名单）。点哪块只铺哪块。
+ *
+ * [onApply] / [onReset] 收的是**带 id 的原始回调**，本函数在下面按 `spec.id` 绑成
+ * [applySelf] / [resetSelf] 供本行自己的控件用；递归渲染子项时继续往下传原始回调，
+ * 于是每一层绑的都是**它自己**的 id —— 危险项的子规则因此写进自己的键。
  */
 @Composable
 private fun SettingRowItem(
     row: RelayContainer.SettingRow,
     expansion: RulesExpansionMemory,
-    onApply: (String, String) -> Unit,
-    onReset: () -> Unit,
+    onApply: (String, String, String) -> Unit,
+    onReset: (String) -> Unit,
     onOpenLink: (PilotDestination) -> Unit,
     captionRows: List<RelayContainer.CapabilityRow>,
     ceilingOverridesJson: () -> String,
@@ -349,6 +353,9 @@ private fun SettingRowItem(
     confirmMode: String,
 ) {
     val spec = row.spec
+    // 本行的写入目标：永远是这一行的 spec.id。父项与子项各自绑各自，不共用一条。
+    val applySelf: (String, String) -> Unit = { encoded, phrase -> onApply(spec.id, encoded, phrase) }
+    val resetSelf: () -> Unit = { onReset(spec.id) }
     // 危险开关的待确认值：null = 没有待确认的改动。放在这里而不是控件回调里，
     // 是因为弹窗必须在组合上下文里渲染，不能从一个普通事件回调里调用 @Composable。
     var pendingSwitch by remember { mutableStateOf<Boolean?>(null) }
@@ -481,7 +488,7 @@ private fun SettingRowItem(
                             if (spec.holdToConfirm) {
                                 pendingSwitch = next
                             } else {
-                                onApply(
+                                applySelf(
                                     next.toString(),
                                     if (next) "已开启：${spec.title}" else "已关闭：${spec.title}",
                                 )
@@ -494,41 +501,41 @@ private fun SettingRowItem(
                     ChoiceControl(
                         spec = spec,
                         current = row.value,
-                        onApply = onApply,
+                        onApply = applySelf,
                         confirmMode = confirmMode,
                     )
                 }
 
                 is RelaySettings.Type.Number -> {
-                    NumberControl(spec = spec, type = type, current = row.value, onApply = onApply)
+                    NumberControl(spec = spec, type = type, current = row.value, onApply = applySelf)
                 }
 
                 is RelaySettings.Type.Text -> {
-                    TextControl(spec = spec, type = type, current = row.value, onApply = onApply)
+                    TextControl(spec = spec, type = type, current = row.value, onApply = applySelf)
                 }
 
                 is RelaySettings.Type.TextList -> {
-                    ListControl(spec = spec, current = row.value, onApply = onApply)
+                    ListControl(spec = spec, current = row.value, onApply = applySelf)
                 }
 
                 is RelaySettings.Type.Document -> when (type.kind) {
                     RelaySettings.Type.Document.Kind.INTENT_TEMPLATES -> TemplateDocumentEditor(
                         spec = spec,
                         current = row.value,
-                        onApply = onApply,
+                        onApply = applySelf,
                     )
 
                     RelaySettings.Type.Document.Kind.SETTINGS_PAGES -> PageDocumentEditor(
                         spec = spec,
                         current = row.value,
-                        onApply = onApply,
+                        onApply = applySelf,
                     )
 
                     RelaySettings.Type.Document.Kind.CEILING_OVERRIDES -> CeilingEditor(
                         captionRows = captionRows,
                         overridesJson = ceilingOverridesJson,
                         effectiveCeiling = effectiveCeiling,
-                        onApply = onApply,
+                        onApply = applySelf,
                         confirmMode = confirmMode,
                     )
                 }
@@ -536,11 +543,12 @@ private fun SettingRowItem(
 
             if (!row.isDefault && !spec.locked) {
                 Spacer(modifier = Modifier.height(6.dp))
-                TextButton(onClick = onReset) { Text("恢复默认") }
+                TextButton(onClick = resetSelf) { Text("恢复默认") }
             }
 
             // 危险项的子规则挂在父项"改这一项"展开之后（父项是"点系统授权框先问你"，
             // 子项是它的三张名单）。它们属于父项的设置，不跟着两块说明展开。
+            // 这里刻意传**原始**回调（而不是 applySelf/resetSelf）：子项各自绑自己的 spec.id。
             row.children.forEach { child ->
                 PilotDivider()
                 SettingRowItem(
@@ -564,7 +572,7 @@ private fun SettingRowItem(
             confirmMode = confirmMode,
             onDismiss = { pendingSwitch = null },
             onConfirmed = {
-                onApply(next.toString(), if (next) "已开启：${spec.title}" else "已关闭：${spec.title}")
+                applySelf(next.toString(), if (next) "已开启：${spec.title}" else "已关闭：${spec.title}")
                 pendingSwitch = null
             },
         )
