@@ -8,7 +8,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 「模拟运行一次」的 **C 方案判据层**：把"这一发现在会不会弹卡"按**真闸门同一条判据**逐条复算。
+ * 「模拟运行一次」的 **C 方案判据层**：把"这一发会不会弹卡"按**真闸门同一条判据**逐条复算。
  *
  * 这一层刻意做成**纯函数、零 Android 依赖**，所以能在 JVM 单测里对钉（见
  * `PilotSimulateDemoTest`）。判据链一个字都不抄：
@@ -106,7 +106,7 @@ object RulesDemo {
          */
         val realRunEligible: Boolean,
     ) {
-        /** 结论是不是"这一发现在不会弹卡"（两条路都算）。 */
+        /** 结论是不是"这一发不会弹卡"（两条路都算）。 */
         val quiet: Boolean
             get() = conclusion == Conclusion.QUIET_BY_LIST || conclusion == Conclusion.QUIET_BY_TIER
 
@@ -237,7 +237,7 @@ object RulesDemo {
     }
 
     /**
-     * 「这一发现在会不会弹卡」的复算：清单里有它 ⇒ 命中的是 `no_state_change` 那条捷径。
+     * 「这一发会不会弹卡」的复算：清单里有它 ⇒ 命中的是 `no_state_change` 那条捷径。
      *
      * 语义与 `IntentTemplateCatalog.isScreenOnly`（`template in snapshot.screenOnlyTemplates`）
      * 逐字相同；单测把同一份清单装进目录快照，与 `IntentTemplates.isNoStateChange` 逐条对钉。
@@ -298,13 +298,14 @@ object RulesDemo {
                         DemoEntry.Unavailable(
                             spec.id,
                             "这一项还没有你自己填的页面，所以现在没有可模拟的对象。" +
-                                "加上一条之后，每一行页面就能算「会不会弹卡」，放行的那些还能真的打开一次。",
+                                "加上一条之后（在「改这一项」里加），每一行页面就能算「会不会弹卡」，" +
+                                "放行的那些还能真的打开一次。",
                         )
                     } else {
                         DemoEntry.UserPages(
                             specId = spec.id,
                             note = "你填的 ${pages.size} 个页面逐条按真闸门算：会不会弹卡；" +
-                                "放行的那些能真的打开一次（会先问你一次）。",
+                                "放行的那些能真的打开一次（会先问你一次）。展开上面「改这一项」逐行看。",
                             pages = pages.map { it.key },
                         )
                     }
@@ -316,13 +317,14 @@ object RulesDemo {
                         DemoEntry.Unavailable(
                             spec.id,
                             "这一项还没有你自己加的动作，所以现在没有可模拟的对象。" +
-                                "加上一条之后，每一行就能算结论、看卡示意 —— 自定义动作不真开。",
+                                "加上一条之后（在「改这一项」里加），每一行就能算结论、看卡示意 —— " +
+                                "自定义动作不真开。",
                         )
                     } else {
                         DemoEntry.UserTemplates(
                             specId = spec.id,
                             note = "你加的 ${templates.size} 条动作逐条算结论、给卡示意：" +
-                                "action 是你自己写的任意字符串，所以不真开。",
+                                "action 是你自己写的任意字符串，所以不真开。展开上面「改这一项」逐行看。",
                             templates = templates.map { it.id },
                         )
                     }
@@ -345,30 +347,30 @@ object RulesDemo {
     /**
      * 不能演的那句准确说明。按"这一项为什么没有单独的一发动作"分类给，不用含糊说法：
      * 显示偏好那条另外点明"演它要真建虚拟屏，我们不建"。
+     *
+     * 每一条都**自成一句**（界面原样渲染，不再另加前缀）：句子开头就把"没有可模拟的运行"说了。
      */
     fun unavailableNote(spec: RelaySettings.Spec): String {
         val type = spec.type
         val reason = when {
             spec.id == RelaySettings.SURFACE_PREFERENCE ->
-                "这一项决定助手在哪块屏上干活。要真演它就得先建一块虚拟屏 —— " +
-                    "我们不建虚拟屏，所以这里只说明，不模拟。"
+                "这一项没有可模拟的运行 —— 要真演它就得先建一块虚拟屏，我们不建虚拟屏，所以这里只说明。"
 
             type is RelaySettings.Type.Link ->
-                "这一项不产生单独的一发动作 —— 它的控制点在「" +
-                    RulesDisplay.linkPageLabel(type.target) + "」那一页，所以这里没有可模拟的运行，" +
-                    "要改就去那里。"
+                "这一项没有可模拟的运行 —— 它不产生单独的一发动作，控制点在「" +
+                    RulesDisplay.linkPageLabel(type.target) + "」那一页，要改就去那里。"
 
             type is RelaySettings.Type.Document ->
-                "这一项是一组别的设置（不是一次动作），所以没有可模拟的运行。"
+                "这一项没有可模拟的运行 —— 它是一组别的设置，不是一次动作。"
 
             spec.group == RelaySettings.Group.DANGER ->
-                "危险项改的是保护你的那道判据本身，不产生单独的一发动作，所以没有可模拟的运行。"
+                "这一项没有可模拟的运行 —— 危险项改的是保护你的那道判据本身，不产生单独的一发动作。"
 
             type is RelaySettings.Type.Number ->
-                "这一项是个数量 / 时长，不产生单独的一发动作，所以没有可模拟的运行。"
+                "这一项没有可模拟的运行 —— 它是个数量 / 时长，不产生单独的一发动作。"
 
             else ->
-                "这一项是个开关 / 取值，不产生单独的一发动作，所以没有可模拟的运行。"
+                "这一项没有可模拟的运行 —— 它是个开关 / 取值，不产生单独的一发动作。"
         }
         // 还没接线的项另有实话要说：改了不生效，界面自己已经标了「暂不可改」。
         return if (spec.wired) reason else reason + "（这一项目前还没接线，改了不生效。）"

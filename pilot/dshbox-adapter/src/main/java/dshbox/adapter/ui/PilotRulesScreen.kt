@@ -1116,7 +1116,8 @@ private fun SettingRowItem(
 
         is RulesDemo.DemoEntry.Unavailable -> Text(
             // 没有可模拟的运行就直说，并说明为什么 —— 不摆一颗点了说法含糊的按钮。
-            text = "这一项没有可模拟的运行：" + entry.note,
+            // 这一句由 RulesDemo.unavailableNote 按**类别**算出来，这里不另拼前缀（免得读起来是两句话叠一起）。
+            text = entry.note,
             style = MaterialTheme.typography.labelSmall,
             lineHeight = 17.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1423,7 +1424,7 @@ private fun ScreenOnlyDemoBlock(
             "（闸门只认 sys.intent 的模板名 + 它此刻在读的那份免问清单），取值就是你现在的 " +
             "approval.screen_only_templates；另外按闸门的真实顺序带上档位一起算 —— " +
             "档位「禁止」最先挡下，档位「完全访问」时清单里没有它也不会弹。" +
-            "「不会弹卡」＝这一发现在会直接上屏；「会弹卡」＝会先弹一张卡问你。",
+            "「不会弹卡」＝这一发会直接上屏；「会弹卡」＝会先弹一张卡问你。",
         style = MaterialTheme.typography.bodySmall,
         lineHeight = 20.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1712,10 +1713,10 @@ private fun UserPageDemoRow(
             // （档位一改就会真弹卡）；档位禁止 ⇒ 发出去只会被挡下。
             val why = when (item.conclusion) {
                 RulesDemo.Conclusion.PROMPTS ->
-                    "这一发现在会弹卡：演示只给你看那张卡的样子，不替你按下它。" +
+                    "这一发此刻会弹卡：演示只给你看那张卡的样子，不替你按下它。" +
                         "自定义页面的 action 是你从系统里抄来的任意字符串，更要你自己确认。"
                 RulesDemo.Conclusion.QUIET_BY_TIER ->
-                    "这一发现不会弹卡，但免开是档位给的（不是免问清单）：档位一改就会真弹卡，" +
+                    "这一发此刻不会弹卡，但免开是档位给的（不是免问清单）：档位一改就会真弹卡，" +
                         "所以演示不替你按这一发。"
                 RulesDemo.Conclusion.BLOCKED ->
                     "这条能力的档位是「禁止」：发出去只会被挡下，演示不发这一发。"
@@ -1745,7 +1746,7 @@ private fun UserPageDemoRow(
             text = {
                 Text(
                     "会真的走一次真闸门（不绕）：你的当前界面会被切走，2～3 秒后自动回到这一页。" +
-                        "上面已经算过：这一发现在不会弹卡。",
+                        "上面已经算过：这一发此刻不会弹卡。",
                 )
             },
             confirmButton = { TextButton(onClick = { confirming = false; onRun() }) { Text("打开") } },
