@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import interlock.relay.core.runtime.RelayContainer
 import interlock.relay.core.runtime.RuntimePhase
 import interlock.relay.core.protocol.CapabilityId
+import interlock.relay.core.protocol.CapabilityDescriptor
 import interlock.relay.core.protocol.AccessTier
 import interlock.relay.core.exec.shizuku.ShizukuState
 import interlock.relay.core.interlock.AccessibilityGap
@@ -14,6 +15,8 @@ import interlock.relay.core.interlock.ApprovalPrompt
 import interlock.relay.core.interlock.InterlockQueue
 import interlock.relay.core.log.RunLog
 import interlock.relay.core.surface.SurfacePreference
+import interlock.relay.core.settings.RelaySettings
+import interlock.relay.core.settings.SettingsStore
 import interlock.relay.core.transport.MailboxServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -81,6 +84,15 @@ data class PilotUiState(
     /** 电池优化是否已豁免本应用。 */
     val batteryIgnored: Boolean = false,
     val shizukuInstalled: Boolean = false,
+
+    /**
+     * 运行时配置中心铺出来的一整张表（含分组、当前值、默认值标记与说明文案）。
+     * 界面完全按它渲染：加一项配置不需要动界面代码。
+     */
+    val settingRows: List<RelayContainer.SettingRow> = emptyList(),
+
+    /** 首屏"当前策略"：一两句人话把当前配置的真实效果总结出来。 */
+    val settingsOverview: List<String> = emptyList(),
 
     /** 一次调用被缺无障碍挡下的现场；非空即弹框。 */
     val accessibilityNotice: RelayContainer.AccessibilityNotice? = null,
@@ -209,6 +221,8 @@ class PilotViewModel(
                         backgroundSurfaceBlock = container.backgroundSurfaceBlock(),
                         batteryIgnored = container.batteryOptimizationIgnored(),
                         shizukuInstalled = container.shizukuInstalled(),
+                        settingRows = RelaySettings.Group.entries.flatMap { container.settingsRows(it) },
+                        settingsOverview = container.settingsOverview(),
                     )
                 }
                 // 一律 update { copy }：这一段挂起过两次 IO，期间 pendingApproval 可能已经换了
@@ -230,6 +244,8 @@ class PilotViewModel(
                         backgroundSurfaceBlock = light.backgroundSurfaceBlock,
                         batteryIgnored = light.batteryIgnored,
                         shizukuInstalled = light.shizukuInstalled,
+                        settingRows = light.settingRows,
+                        settingsOverview = light.settingsOverview,
                     )
                 }
                 if (!heavy) return@withLock
@@ -266,6 +282,48 @@ class PilotViewModel(
         container.setVerboseLog(enabled)
         refresh()
     }
+
+    /** 写一项配置。返回 null 表示成功，否则是一句给用户看的原因（界面直接显示）。 */
+    fun setSetting(id: String, encoded: String): String? {
+        val error = container.setSetting(id, encoded)
+        refresh()
+        return error
+    }
+
+    fun resetSetting(id: String): List<String> {
+        val touched = container.resetSettings(listOf(id))
+        refresh()
+        return touched
+    }
+
+    fun resetSettingsGroup(group: RelaySettings.Group): List<String> {
+        val touched = container.resetSettingsGroup(group)
+        refresh()
+        return touched
+    }
+
+    fun resetAllSettings(): List<String> {
+        val touched = container.resetAllSettings()
+        refresh()
+        return touched
+    }
+
+    fun exportSettings(): String = container.exportSettings()
+
+    fun importSettings(text: String): SettingsStore.ImportResult {
+        val result = container.importSettings(text)
+        refresh()
+        return result
+    }
+
+    /** 上限编辑器读写的那段 JSON。 */
+    fun ceilingOverridesJson(): String = container.ceilingOverridesJson()
+
+    /** 危险项的确认方式：`HOLD` 长按 3 秒 / `PHRASE` 输入短语。 */
+    fun confirmMode(): String = container.confirmMode()
+
+    fun effectiveCeiling(descriptor: interlock.relay.core.protocol.CapabilityDescriptor): String =
+        container.effectiveCeiling(descriptor).name
 
     /** 返回释放的字节数；null 表示有调用在途、此刻不清。 */
     fun clearArtifacts(): Long? {
@@ -307,6 +365,8 @@ class PilotViewModel(
         val backgroundSurfaceBlock: RelayContainer.BackgroundSurfaceBlock?,
         val batteryIgnored: Boolean,
         val shizukuInstalled: Boolean,
+        val settingRows: List<RelayContainer.SettingRow>,
+        val settingsOverview: List<String>,
     )
 
     private data class HeavySnapshot(

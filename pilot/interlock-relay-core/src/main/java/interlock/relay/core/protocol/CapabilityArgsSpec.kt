@@ -70,6 +70,8 @@ object CapabilityArgsSpec {
     private const val KEY_PACKAGE = "package"
     private const val KEY_KEYWORD = "keyword"
     private const val KEY_LIMIT = "limit"
+    /** [补丁] media.read 的导出开关（见 DirectBackend.KEY_EXPORT）。 */
+    private const val KEY_EXPORT = "export"
     private const val KEY_INCLUDE_ONGOING = "includeOngoing"
     private const val KEY_TITLE = "title"
     private const val KEY_ID = "id"
@@ -93,9 +95,31 @@ object CapabilityArgsSpec {
     private const val KEY_HEIGHT = "height"
     private const val KEY_DPI = "dpi"
 
+    /**
+     * `surface.virtual` 的「这块后台屏要不要抢焦点」两键，以及 `screen.capture` 的成像四键。
+     *
+     * 两处都只是**可选**键：不传时后端走原来那条路（屏照旧可聚焦、截图照旧整屏无损 PNG），
+     * 所以这里给的是空 required。
+     */
+    private const val KEY_FOCUSABLE = "focusable"
+    private const val KEY_EXTRA_FLAGS = "extraFlags"
+    private const val KEY_MAX_EDGE = "maxEdge"
+    private const val KEY_SCALE = "scale"
+    private const val KEY_FORMAT = "format"
+    private const val KEY_QUALITY = "quality"
+
     /** ShellVerbs.KEY_VERB / KEY_ARGS：sys.shell 顶层两键。 */
     private const val KEY_VERB = "verb"
     private const val KEY_ARGS = "args"
+
+    /**
+     * 可选目标屏键（读树/坐标注入那 15 条 + `app.launch`，见 `DisplayTarget.CAPABILITIES`）。
+     * 不传时后端走的还是原来那条路（落点由执行模式偏好裁决），所以处处都是可选键。
+     */
+    private const val KEY_DISPLAY = "display"
+
+    /** 目标屏键的类型档：`DisplayTarget.resolve` 只认 JSON 数字，字符串一律拒。 */
+    private val DISPLAY_TYPE = mapOf(KEY_DISPLAY to ArgType.NUMBER)
 
     /** 节点级目标键：指向写法只有 selector / nodeId / relative 三种（NodeSelector 判互斥）。 */
     private val TARGET_KEYS = setOf(KEY_SELECTOR, KEY_NODE_ID, KEY_RELATIVE)
@@ -116,14 +140,18 @@ object CapabilityArgsSpec {
      * `1.5` 这类小数能过 NUMBER 档、到后端才被拒 —— 白占一次用户确认与通道等待，
      * 正是这张表要前移的那类拒绝。org.json 的分词器也收 NaN/Infinity 字面量，
      * 所以「非有限值」一并挡在这里。
+     *
+     * `display` 同理：`DisplayTarget.resolve` 按 displayId 精确比对，`1.5` 这种编号
+     * 谁都不是，必须在闸门之前就按「must be a whole number」打回。
      */
-    private val WHOLE_NUMBER_KEYS = setOf(KEY_NODE_ID)
+    private val WHOLE_NUMBER_KEYS = setOf(KEY_NODE_ID, KEY_DISPLAY)
 
     /**
      * 每条能力一份规范。逐组的对齐依据：
      *
-     * - 空 allowed（ui.snapshot / screen.capture / screen.observe）：三条服务后端的 ArgSpec
-     *   都是不收任何键的空表，其余能力照三张表的并集抄录；
+     * - 空 allowed（screen.capture / screen.observe）：两条服务后端的 ArgSpec 都是不收任何键
+     *   的空表，其余能力照三张表的并集抄录；ui.snapshot 从空表放开成一个可选的 `display`
+     *   （见 `DisplayTarget`），三张后端表同步跟着放开；
      * - ui.tap / ui.swipe：A11y 键表必填 {x,y} 与四个端点；Shizuku 的 ArgSpec 虽未列必填，
      *   但 displayTap/displaySwipe 的 intArgsError 对缺键同样报 "missing arg"，交集仍是
      *   全套坐标；坐标键两条通路都以 "must be a number" 拒绝非数字，故有 NUMBER 类型；
@@ -140,64 +168,80 @@ object CapabilityArgsSpec {
      *   收下（夹紧），故都不设类型。
      */
     private val specs: Map<CapabilityId, Spec> = mapOf(
-        CapabilityId.UI_SNAPSHOT to Spec(emptySet()),
-        CapabilityId.SCREEN_CAPTURE to Spec(emptySet()),
+        // 快照从来不收键，直到 `display` 这一条：它只是把落点从「执行模式偏好裁决」
+        // 换成「调用方点名哪块屏」，取树规则本身不动（见 DisplayTarget）。
+        CapabilityId.UI_SNAPSHOT to Spec(setOf(KEY_DISPLAY), types = DISPLAY_TYPE),
+        // 成像四键只有 trusted-display 那条路实现（a11y / direct 两张键表都是空的）：传了它们
+        // 却落在另两条路上，由各自的 argsError 回 unknown key —— 这里不替它们改口径。
+        // 四键都不设类型：后端一律用 optInt / optDouble / optString 把值收下并夹紧，
+        // 预校验拒掉后端本会接受的调用，等于把「夹紧」升格成「报错」。
+        CapabilityId.SCREEN_CAPTURE to Spec(setOf(KEY_MAX_EDGE, KEY_SCALE, KEY_FORMAT, KEY_QUALITY)),
         CapabilityId.SCREEN_OBSERVE to Spec(emptySet()),
 
         CapabilityId.UI_TAP to Spec(
-            allowed = setOf(KEY_X, KEY_Y),
+            allowed = setOf(KEY_X, KEY_Y, KEY_DISPLAY),
             required = setOf(KEY_X, KEY_Y),
-            types = mapOf(KEY_X to ArgType.NUMBER, KEY_Y to ArgType.NUMBER),
+            types = mapOf(KEY_X to ArgType.NUMBER, KEY_Y to ArgType.NUMBER) + DISPLAY_TYPE,
         ),
         CapabilityId.UI_SWIPE to Spec(
-            allowed = setOf(KEY_FROM_X, KEY_FROM_Y, KEY_TO_X, KEY_TO_Y, KEY_DURATION_MS),
+            allowed = setOf(KEY_FROM_X, KEY_FROM_Y, KEY_TO_X, KEY_TO_Y, KEY_DURATION_MS, KEY_DISPLAY),
             required = setOf(KEY_FROM_X, KEY_FROM_Y, KEY_TO_X, KEY_TO_Y),
             types = mapOf(
                 KEY_FROM_X to ArgType.NUMBER,
                 KEY_FROM_Y to ArgType.NUMBER,
                 KEY_TO_X to ArgType.NUMBER,
                 KEY_TO_Y to ArgType.NUMBER,
-            ),
+            ) + DISPLAY_TYPE,
         ),
-        CapabilityId.UI_TEXT to Spec(setOf(KEY_TEXT), setOf(KEY_TEXT)),
-        CapabilityId.UI_KEY to Spec(setOf(KEY_KEY), setOf(KEY_KEY)),
+        CapabilityId.UI_TEXT to Spec(setOf(KEY_TEXT, KEY_DISPLAY), setOf(KEY_TEXT), DISPLAY_TYPE),
+        CapabilityId.UI_KEY to Spec(setOf(KEY_KEY, KEY_DISPLAY), setOf(KEY_KEY), DISPLAY_TYPE),
 
-        CapabilityId.UI_CLICK to Spec(TARGET_KEYS, types = TARGET_TYPES),
-        CapabilityId.UI_LONG_CLICK to Spec(TARGET_KEYS, types = TARGET_TYPES),
-        CapabilityId.UI_SELECT to Spec(TARGET_KEYS, types = TARGET_TYPES),
-        CapabilityId.UI_DISMISS to Spec(TARGET_KEYS, types = TARGET_TYPES),
-        CapabilityId.UI_NODE to Spec(TARGET_KEYS, types = TARGET_TYPES),
-        CapabilityId.UI_IME_ACTION to Spec(TARGET_KEYS, types = TARGET_TYPES),
+        CapabilityId.UI_CLICK to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
+        CapabilityId.UI_LONG_CLICK to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
+        CapabilityId.UI_SELECT to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
+        CapabilityId.UI_DISMISS to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
+        CapabilityId.UI_NODE to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
+        CapabilityId.UI_IME_ACTION to Spec(TARGET_KEYS + KEY_DISPLAY, types = TARGET_TYPES + DISPLAY_TYPE),
         CapabilityId.UI_SCROLL to Spec(
-            allowed = TARGET_KEYS + setOf(KEY_DIRECTION, KEY_TIMES, KEY_UNTIL),
+            allowed = TARGET_KEYS + setOf(KEY_DIRECTION, KEY_TIMES, KEY_UNTIL, KEY_DISPLAY),
             required = setOf(KEY_DIRECTION),
-            types = TARGET_TYPES + mapOf(KEY_TIMES to ArgType.NUMBER, KEY_UNTIL to ArgType.NUMBER),
+            types = TARGET_TYPES + mapOf(KEY_TIMES to ArgType.NUMBER, KEY_UNTIL to ArgType.NUMBER) +
+                DISPLAY_TYPE,
         ),
         CapabilityId.UI_SET_VALUE to Spec(
-            allowed = TARGET_KEYS + setOf(KEY_TEXT),
+            allowed = TARGET_KEYS + setOf(KEY_TEXT, KEY_DISPLAY),
             required = setOf(KEY_TEXT),
-            types = TARGET_TYPES,
+            types = TARGET_TYPES + DISPLAY_TYPE,
         ),
         CapabilityId.UI_SET_PROGRESS to Spec(
-            allowed = TARGET_KEYS + setOf(KEY_PERCENT, KEY_VALUE),
-            types = TARGET_TYPES + mapOf(KEY_PERCENT to ArgType.NUMBER, KEY_VALUE to ArgType.NUMBER),
+            allowed = TARGET_KEYS + setOf(KEY_PERCENT, KEY_VALUE, KEY_DISPLAY),
+            types = TARGET_TYPES + mapOf(KEY_PERCENT to ArgType.NUMBER, KEY_VALUE to ArgType.NUMBER) +
+                DISPLAY_TYPE,
         ),
         CapabilityId.UI_WAIT_FOR to Spec(
-            allowed = TARGET_KEYS + setOf(KEY_TEXT, KEY_CHECKED, KEY_ABSENT, KEY_TIMEOUT_MS),
-            types = TARGET_TYPES + mapOf(KEY_TIMEOUT_MS to ArgType.NUMBER),
+            allowed = TARGET_KEYS + setOf(KEY_TEXT, KEY_CHECKED, KEY_ABSENT, KEY_TIMEOUT_MS, KEY_DISPLAY),
+            types = TARGET_TYPES + mapOf(KEY_TIMEOUT_MS to ArgType.NUMBER) + DISPLAY_TYPE,
         ),
 
-        CapabilityId.APP_LAUNCH to Spec(setOf(KEY_PACKAGE), setOf(KEY_PACKAGE)),
+        // `display` 只对启动有意义（这次把应用投到哪块屏），由裁决层换算成执行面；
+        // 不传就与从前一致 —— 包名照旧是唯一必填键。
+        CapabilityId.APP_LAUNCH to Spec(
+            setOf(KEY_PACKAGE, KEY_DISPLAY),
+            setOf(KEY_PACKAGE),
+            DISPLAY_TYPE,
+        ),
         CapabilityId.APP_STOP to Spec(setOf(KEY_PACKAGE), setOf(KEY_PACKAGE)),
-        CapabilityId.SURFACE_VIRTUAL to Spec(setOf(KEY_ACTION, KEY_WIDTH, KEY_HEIGHT, KEY_DPI)),
+        CapabilityId.SURFACE_VIRTUAL to Spec(
+            setOf(KEY_ACTION, KEY_WIDTH, KEY_HEIGHT, KEY_DPI, KEY_FOCUSABLE, KEY_EXTRA_FLAGS),
+        ),
 
         CapabilityId.SYS_INTENT to Spec(
             // IntentTemplates 的封闭键集（template/hour/minute/length/message/page/
-            // package/number/url）：模板名必填，其余键由模板各自判形状与取值范围，
+            // package/number/url/handler）：模板名必填，其余键由模板各自判形状与取值范围，
             // 表内不重复那份判据；数值与文本键全被 optInt/optString 收下，故不设类型。
             allowed = setOf(
                 "template", "hour", "minute", "length", "message",
-                "page", "package", "number", "url",
+                "page", "package", "number", "url", "handler",
             ),
             required = setOf("template"),
         ),
@@ -228,7 +272,7 @@ object CapabilityArgsSpec {
             required = setOf(KEY_TITLE),
         ),
         CapabilityId.LOCATION_READ to Spec(emptySet()),
-        CapabilityId.MEDIA_READ to Spec(setOf(KEY_KIND, KEY_LIMIT)),
+        CapabilityId.MEDIA_READ to Spec(setOf(KEY_KIND, KEY_LIMIT, KEY_EXPORT)),
         CapabilityId.MEDIA_WRITE to Spec(setOf(KEY_FILE, KEY_KIND), setOf(KEY_FILE)),
         CapabilityId.NOTIFY_READ to Spec(setOf(KEY_LIMIT, KEY_PACKAGE, KEY_INCLUDE_ONGOING)),
         CapabilityId.NOTIFY_POST to Spec(setOf(KEY_TITLE, KEY_TEXT, KEY_ID), setOf(KEY_TITLE)),
@@ -236,6 +280,13 @@ object CapabilityArgsSpec {
 
         CapabilityId.SCREEN_RECORD to Spec(setOf(KEY_SECONDS)),
     )
+
+    /**
+     * 这条能力接受的顶层键（升序）。给能力清单用：清单里那句 `args` 与这里的
+     * [validate] 是同一张表，助手看到的就是闸门真的会放行的那几个键，不是另抄一份。
+     * 表外的能力（理论上不存在，注册表那条用例盯着）回空表。
+     */
+    fun allowedKeys(id: CapabilityId): List<String> = specs[id]?.allowed?.sorted() ?: emptyList()
 
     /**
      * 纯函数预校验：null=通过，否则给出一条可直接回给助手的措辞（与后端 argsError 同源）。

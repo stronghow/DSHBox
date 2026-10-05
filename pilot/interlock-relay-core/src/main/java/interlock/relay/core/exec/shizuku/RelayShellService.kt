@@ -39,6 +39,86 @@ class RelayShellService @JvmOverloads constructor(
 ) : Binder() {
 
     /**
+     * [补丁] 无障碍自动开启。
+     *
+     * 本类实例活在 Shizuku 用户服务进程里，身份是 shell(2000)：这是本应用唯一能直接写
+     * secure settings 的地方。relay 的 `settings` 动词只放行读（写会判 E_TRANSPORT_MALFORMED），
+     * 而 Shizuku 客户端的 `newProcess` 在 api:13.1.5 里是 private，宿主进程根本起不了进程——
+     * 所以这件事只能在服务端做。
+     *
+     * Android 13+ 对侧载应用有"受限设置"(RSS) 限制，但那只拦应用身份；shell 身份写
+     * secure settings 不受它约束，这也是走这条路能绕过去的根本原因。
+     *
+     * 幂等：已包含本组件就只补 accessibility_enabled；列表其余项（例如 GKD 的服务）原样保留。
+     * 任何失败只打日志，绝不把异常抛出去——本进程同时服务命令执行、安装与可信屏。
+     */
+    private fun ensureAccessibilityAsync() {
+        if (a11yEnsured) return
+        a11yEnsured = true
+        val body = object : Runnable {
+            override fun run() {
+                for (attempt in 1..A11Y_MAX_ATTEMPTS) {
+                    val ok = runCatching { ensureAccessibilityOnce() }.getOrElse {
+                        android.util.Log.i(A11Y_TAG, "a11y 第${attempt}次异常: ${it.javaClass.name}: ${it.message}")
+                        false
+                    }
+                    if (ok) return
+                    try {
+                        Thread.sleep(A11Y_RETRY_MS)
+                    } catch (e: InterruptedException) {
+                        return
+                    }
+                }
+                android.util.Log.i(A11Y_TAG, "a11y 放弃: $A11Y_MAX_ATTEMPTS 次尝试都没成功")
+            }
+        }
+        Thread(body).apply {
+            isDaemon = true
+            name = "relay-a11y-ensure"
+        }.start()
+    }
+
+    private fun ensureAccessibilityOnce(): Boolean {
+        val current = ShellRunner.run("settings get secure $A11Y_KEY_SERVICES", A11Y_CMD_TIMEOUT_MS)
+            .stdout.trim()
+        android.util.Log.i(A11Y_TAG, "a11y 读到原值: '$current'")
+        val items = current.split(A11Y_SEP).map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+        if (items.any { it.equals(A11Y_COMPONENT, ignoreCase = true) }) {
+            android.util.Log.i(A11Y_TAG, "a11y 已包含本组件，不重复追加")
+        } else {
+            val newValue = (items + A11Y_COMPONENT).joinToString(A11Y_SEP)
+            android.util.Log.i(A11Y_TAG, "a11y 追加本组件 -> '$newValue'")
+            ShellRunner.run(
+                "settings put secure $A11Y_KEY_SERVICES " + shellQuoteForPatch(newValue),
+                A11Y_CMD_TIMEOUT_MS,
+            )
+        }
+        val after = ShellRunner.run("settings get secure $A11Y_KEY_SERVICES", A11Y_CMD_TIMEOUT_MS)
+            .stdout.trim()
+        val ok = after.split(A11Y_SEP).map { it.trim() }
+            .any { it.equals(A11Y_COMPONENT, ignoreCase = true) }
+        android.util.Log.i(A11Y_TAG, "a11y 写入后回读: '$after'（含本组件=$ok）")
+        if (!ok) return false
+        val enabled = ShellRunner.run("settings get secure $A11Y_KEY_ENABLED", A11Y_CMD_TIMEOUT_MS)
+            .stdout.trim()
+        if (enabled != "1") {
+            ShellRunner.run("settings put secure $A11Y_KEY_ENABLED 1", A11Y_CMD_TIMEOUT_MS)
+            android.util.Log.i(A11Y_TAG, "a11y accessibility_enabled: '$enabled' -> '1'")
+        } else {
+            android.util.Log.i(A11Y_TAG, "a11y accessibility_enabled 已是 1")
+        }
+        return true
+    }
+
+    /** [补丁] 与 ShellVerbs.shellQuote 同款：单引号包裹并转义，值里出现引号也不会串命令。 */
+    private fun shellQuoteForPatch(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
+
+    init {
+        ensureAccessibilityAsync()
+    }
+
+    /**
      * 事务入口。这里的每一行都不许把异常放出去：Android 10 起 binder 线程上的未捕获
      * 异常直接走默认处理器打死本进程，而这一个进程同时服务命令执行、安装与那块可信屏——
      * 一次读坏参数就能把三条通路一起带走，且宿主侧只会看到「后端不可用」。
@@ -71,7 +151,14 @@ class RelayShellService @JvmOverloads constructor(
         }
 
         ShellProtocol.CODE_DISPLAY_CREATE -> {
-            val created = TrustedDisplay.create(injectedContext, data.readInt(), data.readInt(), data.readInt())
+            // 后两个 int 后加：`focusable` 是三态（-1 没提 / 1 可聚焦 / 0 不抢焦点），
+            // `extraFlags` 是额外按位或上去的位（-1 没提）。两个都在 TrustedDisplay 里判，
+            // 那边才知道这块屏此刻用的是什么。
+            val created = TrustedDisplay.create(
+                injectedContext,
+                data.readInt(), data.readInt(), data.readInt(),
+                data.readInt(), data.readInt(),
+            )
             reply?.writeInt(created.first)
             reply?.writeString(created.second)
             true
@@ -369,6 +456,17 @@ class RelayShellService @JvmOverloads constructor(
         @Volatile
         private var images: ImageReader? = null
 
+        /**
+         * 这块屏建起来时，除 [BASE_FLAGS] 之外实际按位或上去的那一组位（见 [wantedExtra]）。
+         *
+         * FLAGS 是建屏那一刻定死的、之后改不了，所以「调用方这次要的建法与现状是否一致」
+         * 只能靠记着当初用了什么来判：记为 0 与记为「没提」是两件事，前者是"确实没加任何位"，
+         * 所以这里用 0 而不用 -1 表示后者（-1 只是调用方那一侧的哨兵）。
+         * 收屏、建屏失败、解绑时一并归零：留着它等于替一块不存在的屏说话。
+         */
+        @Volatile
+        private var appliedExtra: Int = 0
+
         @Volatile
         private var pump: Thread? = null
 
@@ -432,8 +530,39 @@ class RelayShellService @JvmOverloads constructor(
             display?.javaClass?.getMethod("getUniqueId")?.invoke(display) as? String
         }.getOrNull()
 
+        /**
+         * 把这一轮请求里的 `focusable` / `extraFlags` 折算成要按位或上去的那一组位。
+         *
+         * 两个参数都是**三态**：`DISPLAY_ARG_UNSPECIFIED` 表示调用方没提这一项，那就沿用
+         * [appliedExtra]（也就是这块屏此刻的建法）；提了才改。于是「一个都不提」的调用算出来
+         * 恰好等于现状，复用分支必然命中 —— 放开这两个开关之前的行为与代价一个字节都没变。
+         *
+         * `extraFlags` 只增不减：那些位是给进阶用法按位或的，没有"清零"的写法，要退回原样
+         * 就 release 再 create。
+         */
+        private fun wantedExtra(focusable: Int, extraFlags: Int): Int {
+            var bits = appliedExtra
+            when (focusable) {
+                ShellProtocol.DISPLAY_FOCUSABLE_OFF -> bits = bits or NO_FOCUS_FLAGS
+                ShellProtocol.DISPLAY_FOCUSABLE_ON -> bits = bits and NO_FOCUS_FLAGS.inv()
+            }
+            if (extraFlags != ShellProtocol.DISPLAY_ARG_UNSPECIFIED) bits = bits or extraFlags
+            return bits
+        }
+
         /** 建一块屏。返回 `<0` 与一句原因，调用方据此如实回错，不留半开的屏。 */
-        fun create(injected: android.content.Context?, width: Int, height: Int, dpi: Int): Pair<Int, String> = synchronized(this) {
+        fun create(
+            injected: android.content.Context?,
+            width: Int,
+            height: Int,
+            dpi: Int,
+            focusable: Int = ShellProtocol.DISPLAY_ARG_UNSPECIFIED,
+            extraFlags: Int = ShellProtocol.DISPLAY_ARG_UNSPECIFIED,
+        ): Pair<Int, String> = synchronized(this) {
+            // 这一轮要用的附加位：没提的项沿用这块屏现有的建法，提了的项照要求改。
+            // 于是「一个都不提」算出来的就是现状本身，下面那条复用分支必然命中 ——
+            // 放开这两个开关之前那次调用的结果与代价都没变。
+            val wanted = wantedExtra(focusable, extraFlags)
             if (display != null) {
                 // 「已经有一块屏」不能只看本进程的字段：那块屏可能被系统收掉了（宿主被杀、
                 // 显示器被回收、token 作废），而这里不核对就会永远答 "display already exists"，
@@ -441,7 +570,18 @@ class RelayShellService @JvmOverloads constructor(
                 // 公共 API 没有"屏被销毁"的回调（`VirtualDisplay.Callback` 只有
                 // onPaused/onResumed/onStopped），只能自己按屏号回问 DisplayManager。
                 when (displayPresent(injected, displayId, displayUniqueId)) {
-                    Presence.PRESENT -> return@synchronized displayId to "display already exists"
+                    Presence.PRESENT ->
+                        if (wanted == appliedExtra) {
+                            return@synchronized displayId to "display already exists"
+                        } else {
+                            // 建法明确要求改过（调用方写了 focusable / extraFlags）且与现状不同：
+                            // 只有收掉重建这一条路 —— FLAGS 是建屏那一刻定死的，改不了。
+                            // 这是调用方点名要的结果，不是"顺手重建"，所以照做，并把新编号回上去。
+                            val cleared = release()
+                            if (cleared.first < 0) {
+                                return@synchronized -1 to "display $displayId could not be rebuilt: ${cleared.second}"
+                            }
+                        }
                     // 问不成就不动现有那块：收掉它是一次不可逆的破坏，而支撑"它没了"的证据并没有拿到。
                     // 回错并点名 release 这条路，调用方仍能把屏收掉再建（不落入"永远建不起来"）。
                     Presence.UNKNOWN -> return@synchronized CODE_UNVERIFIED to
@@ -479,13 +619,15 @@ class RelayShellService @JvmOverloads constructor(
                 // DisplayManager 回问发现。
                 @Suppress("UNCHECKED_CAST")
                 val created = enter.invoke(
-                    manager, DISPLAY_NAME, w, h, d, reader.surface, FLAGS, null, Handler(thread.looper),
+                    manager, DISPLAY_NAME, w, h, d, reader.surface, BASE_FLAGS or wanted, null, Handler(thread.looper),
                 ) as VirtualDisplay
                 val id = created.display?.displayId ?: error("created display has no id")
                 images = reader
                 display = created
                 displayId = id
                 displayUniqueId = uniqueIdOf(created.display)
+                // 记下**实际**用出去的那一组附加位：下一次 create 拿它比，才知道要不要重建。
+                appliedExtra = wanted
                 // 上一块屏可能留了一帧没人收（收屏时那条读线程没在 1 秒内让开）：不清就会
                 // 成为新屏的第一张截图，看着像「屏卡住了」。
                 runCatching { held.getAndSet(null)?.close() }
@@ -506,6 +648,7 @@ class RelayShellService @JvmOverloads constructor(
                 looperThread = null
                 runCatching { images?.close() }
                 images = null
+                appliedExtra = 0
                 -1 to "${it.javaClass.simpleName}: ${it.message ?: "no message"}"
             }
         }
@@ -525,6 +668,9 @@ class RelayShellService @JvmOverloads constructor(
             displayId = -1
             displayUniqueId = null
             images = null
+            // 屏没了，这一组附加位也就跟着作废：留着它，下一次建屏会以为"现状"就是带这些位的，
+            // 于是调用方不写 focusable 时复用的仍是一块抢焦点的屏（或反过来）。
+            appliedExtra = 0
             // 收屏即作废此刻所有空闲计时器：见 startWatchdog 里那句"认不出自己就退场"。
             generation++
             stopThread(pump)
@@ -755,7 +901,7 @@ class RelayShellService @JvmOverloads constructor(
         private const val FLAG_TRUSTED = 1024
         private const val FLAG_OWN_DISPLAY_GROUP = 2048
         private const val FLAG_ALWAYS_UNLOCKED = 4096
-        private val FLAGS = FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or FLAG_ALWAYS_UNLOCKED or
+        private val BASE_FLAGS = FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or FLAG_ALWAYS_UNLOCKED or
             FLAG_OWN_CONTENT_ONLY or FLAG_DESTROY_CONTENT_ON_REMOVAL or
             FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS or FLAG_PUBLIC
         // FLAG_PUBLIC 决定这块屏能不能被无障碍后端读到，两侧的后果都要写清。
@@ -775,6 +921,26 @@ class RelayShellService @JvmOverloads constructor(
         // 把任意第三方应用放上来跑本就是这条通路的目的（没有 TRUSTED 反而做不到），所以
         // ①②越过的都不是对用户承诺过的隔离：界面与助手说明里没有一处说过这块屏私有。
         // 收窄的前提是让无障碍后端在非公开屏上也能枚举，目前没有那样的公开通路。
+
+        // ── 「别跟真屏抢焦点」那一组位（`surface.virtual create {focusable:false}`） ──
+        //
+        // 取值不是照记忆写的：本机 `/system/framework/framework.jar` 就是这台机器的框架，
+        // 把它拆出 classes2.dex、解 `DisplayManager` 的 static_values 读到的原文是
+        // `VIRTUAL_DISPLAY_FLAG_OWN_FOCUS = 16384`、`VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED
+        // = 65536`（同一张表里 TRUSTED=1024 / OWN_DISPLAY_GROUP=2048 / ALWAYS_UNLOCKED=4096
+        // 与上面那组对得上，所以这张表可信）。
+        //
+        // 两个一起置：STEAL_TOP_FOCUS_DISABLED 的名字直接对上「别把真屏的顶层焦点抢走」，
+        // OWN_FOCUS 让这块屏自带焦点、同样不去影响别的屏。它们只改焦点归属与输入法的跟随目标，
+        // **不动 FLAG_PUBLIC** —— 那一位是十一条节点级能力能读到树的前提（见上），
+        // 拿它去换焦点等于把 `ui.snapshot` 一起换掉，那不是这次要的事。
+        //
+        // 观测到的现象（改之前）：屏上的游戏是 WMS 的 `mFocusedApp`，且在
+        // `dumpsys input_method` 里带着 `selfReportedDisplayId=9` 的 IME 会话 —— 真屏的
+        // 输入法目标因此会被这块屏上的应用顶掉。
+        private const val FLAG_OWN_FOCUS = 1 shl 14
+        private const val FLAG_STEAL_TOP_FOCUS_DISABLED = 1 shl 16
+        private const val NO_FOCUS_FLAGS = FLAG_OWN_FOCUS or FLAG_STEAL_TOP_FOCUS_DISABLED
 
         private const val MAX_IMAGES = 2
         private const val MIN_SIDE = 320
@@ -808,6 +974,21 @@ class RelayShellService @JvmOverloads constructor(
         val STAGED_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,79}\\.apk")
         const val COPY_BUFFER_BYTES = 64 * 1024
         const val MAX_STAGED_BYTES = 128L * 1024L * 1024L
+
+        // ---- [补丁] 无障碍自动开启 ----
+        const val A11Y_TAG = "DSHBoxPatch"
+        const val A11Y_COMPONENT =
+            "com.dshbox.app/interlock.relay.core.exec.a11y.RelayAccessibilityService"
+        const val A11Y_KEY_SERVICES = "enabled_accessibility_services"
+        const val A11Y_KEY_ENABLED = "accessibility_enabled"
+        const val A11Y_SEP = ":"
+        const val A11Y_CMD_TIMEOUT_MS = 5_000L
+        const val A11Y_MAX_ATTEMPTS = 3
+        const val A11Y_RETRY_MS = 2_000L
+
+        /** 每进程只做一次；重绑不再重复写设置。 */
+        @Volatile
+        var a11yEnsured = false
     }
 }
 

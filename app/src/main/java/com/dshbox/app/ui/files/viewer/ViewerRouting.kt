@@ -52,12 +52,24 @@ internal fun resolveBodyMode(
     markupKindOf(kind, extension) != null -> ViewerMode.MARKUP
     kind in TEXT_KINDS -> ViewerMode.TEXT
     kind == FileTypeClassifier.FileKind.PDF -> ViewerMode.PDF
+    // 安装包优先于压缩包分支：APK 命中 ZIP 魔数会走 ARCHIVE，这里改送信息卡（安装/打开方式/复制路径）
+    isInstallPackage(extension, subType) -> ViewerMode.INFO
     kind == FileTypeClassifier.FileKind.ARCHIVE &&
         ArchiveBrowser.formatOf(extension, subType) != null -> ViewerMode.ARCHIVE
     kind == FileTypeClassifier.FileKind.OFFICE && hasFullBytes -> ViewerMode.TEXT
     kind in HEX_KINDS -> ViewerMode.HEX
     else -> ViewerMode.INFO
 }
+
+/**
+ * 安装包类扩展名（[补丁]）：APK 是"装"的不是"翻 zip"的，`.idsig` 是签名旁路文件，
+ * 都不做内建预览，直接落信息卡——那里有「安装 / 用其他应用打开 / 复制路径」出口。
+ */
+internal val INSTALL_PACKAGE_EXTENSIONS = setOf("apk", "apks", "xapk", "idsig")
+
+/** 是否安装包类文件（按扩展名或分类器子类型判定）。 */
+internal fun isInstallPackage(extension: String, subType: String?): Boolean =
+    extension.lowercase() in INSTALL_PACKAGE_EXTENSIONS || subType == "apk"
 
 /** MARKUP 类型的预览承接（仅 MARKUP kind；xml/css 等仍走纯文本编辑）。 */
 internal fun markupKindOf(kind: FileTypeClassifier.FileKind, extension: String): MarkupKind? {

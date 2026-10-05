@@ -46,6 +46,18 @@ class InterlockGate(
     private val broker: InterlockBroker,
     private val runLog: RunLog,
     private val now: () -> Long = ::monotonicNow,
+    /**
+     * 运行时配置中心。null = 未接线，一切按编译期常量走（单测与未装配的场景）。
+     *
+     * 它只影响三件事，且**默认值都等于原来的常量**：
+     * - 逐条能力的上限覆盖（[RelaySettings.CEILING_OVERRIDES]，默认空表）；
+     * - 「本会话内允许」的有效时长（[RelaySettings.SESSION_GRANT_MINUTES]，默认 30 分钟）；
+     * - 「允许一次」是否写成会话记忆（[RelaySettings.ALLOW_ONCE_SESSION]，默认否）。
+     *
+     * 判据本身（[verdict]、[requiresApproval]）一个字没改：覆盖后的上限仍旧喂给同一张表，
+     * 所以"没拨过任何配置"与"没有这个对象"是同一条判定路径。
+     */
+    private val settings: interlock.relay.core.settings.SettingsStore? = null,
 ) {
 
     /** 审批频率限速器：与执行配额同一张分档表，但单独实例、单独记账。 */
@@ -90,19 +102,42 @@ class InterlockGate(
          * 而不是把用户的档位设置改掉。
          */
         hostBringToFront: Boolean = false,
+        /**
+         * 「只上屏、不改状态」这一形状（`sys.intent` 里那六条模板，见
+         * `IntentTemplates.noStateChange`）。
+         *
+         * 为什么单给一条豁免：`sys.intent` 八条模板共用一个能力档位，可它们的副作用分两类——
+         * `alarm.set` / `timer.set` 会真的建出闹钟/计时器，而 `settings.open` / `alarm.show` /
+         * `timer.show` / `app.info` / `dial` / `web.open` 只把系统页面摆到用户眼前，不新建任何
+         * 记录、也不改任何系统状态。后者没有需要用户背书的东西，却在「每次询问」这一档下
+         * 被一并挡下 —— 一次提示词注入能造成的后果，与用户点一下桌面图标是同一件事。
+         *
+         * 按形状放行而不是把整条 `sys.intent` 的档位放开：判据由模板表（`IntentTemplates`）
+         * 给，`alarm.set` / `timer.set` 不在其中，照旧走下面的档位判定。档位被显式设成
+         * 「拒绝」时仍被上面的 [verdict] 挡下；目标是系统授权界面时（[consentScreen]）
+         * 也不适用——那条判据排在所有豁免之前，与 [requiresApproval] 里的同一条规则同口径。
+         * 授权记录里单独记一条判据名，档位照实记，而不是把用户的档位设置改掉。
+         */
+        noStateChangeIntent: Boolean = false,
     ): GateResult {
         val id = descriptor.id
         val systemState = system.state
         val tier = tiers.tierOf(id)
+        // 上限可以被用户在设置里逐条覆盖（默认空表 = 编译期值，行为不变）。
+        val ceiling = settings?.ceilingOf(id, descriptor.ceiling) ?: descriptor.ceiling
 
         if (hostBringToFront) {
             return GateResult(true, false, null, systemState, tier, "host_bring_to_front")
         }
 
-        verdict(systemState, tier, descriptor.ceiling)?.let { return it }
+        verdict(systemState, tier, ceiling)?.let { return it }
+
+        if (noStateChangeIntent && !consentScreen) {
+            return GateResult(true, false, null, systemState, tier, "no_state_change")
+        }
 
         val sessionGranted = !consentScreen && tiers.sessionGranted(id, now())
-        val needsApproval = requiresApproval(tier, descriptor.ceiling, sessionGranted, consentScreen)
+        val needsApproval = requiresApproval(tier, ceiling, sessionGranted, consentScreen)
         if (!needsApproval) {
             return GateResult(true, false, null, systemState, tier, "auto")
         }
@@ -127,16 +162,22 @@ class InterlockGate(
                 risk = riskOf(id),
                 callIndexInSession = index,
                 paramDetail = paramDetail,
-                allowsSessionGrant = descriptor.ceiling != TierCeiling.ASK_ONLY && !consentScreen,
+                allowsSessionGrant = ceiling != TierCeiling.ASK_ONLY && !consentScreen,
             ),
             budgetMs = budgetMs,
         )
         return when (outcome) {
-            ApprovalOutcome.AllowedOnce ->
+            ApprovalOutcome.AllowedOnce -> {
+                // 「允许一次」默认只消掉这一张卡。用户在危险分组里可以把它改成"记住一段"，
+                // 那一刻起它与「本会话内允许」同义 —— 界面会直说这一点。
+                if (allowOnceRemembersSession()) {
+                    tiers.grantForSession(id, now() + sessionGrantMs())
+                }
                 GateResult(true, true, null, systemState, tier, "approved_once")
+            }
 
             ApprovalOutcome.AllowedForSession -> {
-                tiers.grantForSession(id, now() + SESSION_GRANT_MS)
+                tiers.grantForSession(id, now() + sessionGrantMs())
                 GateResult(true, true, null, systemState, tier, "approved_session")
             }
 
@@ -203,6 +244,16 @@ class InterlockGate(
 
         else -> RiskLevel.LOW
     }
+
+    /** 「本会话内允许」的有效时长。用户没拨过时就是 [SESSION_GRANT_MS]。 */
+    private fun sessionGrantMs(): Long {
+        val minutes = settings?.int(interlock.relay.core.settings.RelaySettings.SESSION_GRANT_MINUTES, 30) ?: 30
+        return minutes.coerceIn(1, 1440) * 60_000L
+    }
+
+    /** 「允许一次」是否也写成会话记忆。默认 false = 只消掉当前这一张卡。 */
+    private fun allowOnceRemembersSession(): Boolean =
+        settings?.bool(interlock.relay.core.settings.RelaySettings.ALLOW_ONCE_SESSION, false) ?: false
 
     companion object {
         const val SESSION_GRANT_MS = 30L * 60L * 1000L

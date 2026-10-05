@@ -20,4 +20,11 @@
     <cache-path
         name="camera_capture"
         path="camera-capture/" />
+    <!-- 「上传手机文件」的副本暂存（cacheDir 之下）：系统「文件 / 相册」回来的是外部
+         content://，读授权只属于本进程，必须先复制进自家目录再以 FileProvider URI 回填，
+         否则页面读不到字节（选完就丢）。
+         必须与 DshWebViewScreen.PHONE_PICK_DIR_NAME 保持一致。 -->
+    <cache-path
+        name="phone_pick"
+        path="phone-pick/" />
 </paths>

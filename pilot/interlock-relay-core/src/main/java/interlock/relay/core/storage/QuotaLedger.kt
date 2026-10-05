@@ -159,7 +159,7 @@ class QuotaLedger(
     }
 
     companion object {
-        const val DEFAULT_MAX_BYTES = 200L * 1024 * 1024
+        const val DEFAULT_MAX_BYTES = 1024L * 1024 * 1024 * 1024
         const val ARTIFACT_TTL_MS = 24L * 60L * 60L * 1000L
         const val ORPHAN_REQUEST_TTL_MS = 10L * 60L * 1000L
         const val RESPONSE_TTL_MS = 30L * 60L * 1000L

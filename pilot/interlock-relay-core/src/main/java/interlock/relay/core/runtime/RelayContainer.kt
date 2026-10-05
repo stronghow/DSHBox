@@ -8,6 +8,7 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import interlock.relay.core.protocol.BackendId
 import interlock.relay.core.protocol.RELAY_PROTOCOL_VERSION
+import interlock.relay.core.protocol.CapabilityArgsSpec
 import interlock.relay.core.protocol.CapabilityDescriptor
 import interlock.relay.core.protocol.CapabilityId
 import interlock.relay.core.protocol.CapabilityState
@@ -49,6 +50,7 @@ import interlock.relay.core.storage.RelayPaths
 import interlock.relay.core.storage.QuotaLedger
 import interlock.relay.core.storage.StorageReaper
 import interlock.relay.core.surface.BackendDispatcher
+import interlock.relay.core.surface.DisplayTarget
 import interlock.relay.core.surface.SurfacePolicy
 import interlock.relay.core.surface.SurfacePreference
 import interlock.relay.core.surface.SurfacePreferences
@@ -66,6 +68,8 @@ import interlock.relay.core.spi.RelayPrefs
 import interlock.relay.core.spi.RelayRedactor
 import interlock.relay.core.spi.RelaySurfaces
 import interlock.relay.core.spi.RelayText
+import interlock.relay.core.settings.RelaySettings
+import interlock.relay.core.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -116,7 +120,58 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
     val paths = RelayPaths(appContext.filesDir, pathPolicy)
     val foreground = ForegroundTracker()
 
-    private val verbosePref = { prefsApi.getBoolean(RelayPrefs.FILE_MAIN, KEY_VERBOSE, false) }
+    /**
+     * 运行时配置中心。所有"以前要改代码才能改"的项都从这里读，缺省即 schema 里的默认值。
+     *
+     * 审计落在 [RelayPaths.auditDir]（宿主私有、不在沙盒绑定子树内）：用户在危险分组里
+     * 把哪一项从什么改成什么，事后能一条条对回来。
+     */
+    private val settings = interlock.relay.core.settings.SettingsStore(
+        prefs = prefsApi,
+        audit = { line -> appendSettingsAudit(line) },
+        documentValidator = { kind, text ->
+            when (kind) {
+                "INTENT_TEMPLATES" -> interlock.relay.core.exec.direct.IntentTemplateCatalog.validateTemplates(text)
+                "SETTINGS_PAGES" -> interlock.relay.core.exec.direct.IntentTemplateCatalog.validatePages(text)
+                "CEILING_OVERRIDES" ->
+                    interlock.relay.core.exec.direct.IntentTemplateCatalog.validateCeilingOverrides(text)
+                else -> null
+            }
+        },
+    )
+
+    /**
+     * 审计追加 + **按尺寸轮转**。
+     *
+     * 手机上没有人会记得去清日志：一个只追加的文件迟早会把用户的空间吃光，而写审计的时机
+     * 恰恰是用户在改危险设置的时候 —— 让这件事把磁盘写满，代价比丢几条旧记录大得多。
+     *
+     * 规则：单个文件超过 [SETTINGS_AUDIT_MAX_BYTES] 就滚一次，
+     * `settings.log` → `.1` → `.2`，最老的（`.2`）删除；即"单文件 ≤1 MB，最多保留 3 份"。
+     * 全过程 runCatching 包住：审计写不进去不能连带把用户这次设置改动弄挂。
+     */
+    private fun appendSettingsAudit(line: String) {
+        runCatching {
+            paths.auditDir.mkdirs()
+            val current = java.io.File(paths.auditDir, SETTINGS_AUDIT_FILE)
+            if (current.length() >= SETTINGS_AUDIT_MAX_BYTES) {
+                java.io.File(paths.auditDir, "$SETTINGS_AUDIT_FILE.2").delete()
+                java.io.File(paths.auditDir, "$SETTINGS_AUDIT_FILE.1")
+                    .renameTo(java.io.File(paths.auditDir, "$SETTINGS_AUDIT_FILE.2"))
+                current.renameTo(java.io.File(paths.auditDir, "$SETTINGS_AUDIT_FILE.1"))
+            }
+            current.appendText(line + "\n")
+        }
+    }
+
+    private val verbosePref = {
+        // schema 里那一项优先；没拨过时回落到本功能之前的旧键，老用户的开关不会丢。
+        if (!settings.isDefault(interlock.relay.core.settings.RelaySettings.VERBOSE_LOG)) {
+            settings.bool(interlock.relay.core.settings.RelaySettings.VERBOSE_LOG, false)
+        } else {
+            prefsApi.getBoolean(RelayPrefs.FILE_MAIN, KEY_VERBOSE, false)
+        }
+    }
     val runLog = RunLog(paths.logsDir, verboseEnabled = verbosePref, redactor = redactor)
 
     private val ledger = QuotaLedger(paths.quotaFile)
@@ -279,7 +334,7 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
     )
 
     private val broker = InterlockBroker(approvalQueue, runLog)
-    private val gatekeeper = InterlockGate(tiers, broker, runLog)
+    private val gatekeeper = InterlockGate(tiers, broker, runLog, settings = settings)
 
     private val directBackend = DirectBackend(
         appContext,
@@ -356,6 +411,9 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
         probe = probe,
         // 只给 nodeId 的目标要靠控件树回查归属，闸门才知道要点的是不是系统授权按钮。
         nodeOwner = { nodeId -> a11yBackend.targetOwner(nodeId) },
+        // `ui.*` 的显式 `display` 靠它认账那两块屏：0 = 用户眼前那块，另一个可信屏的编号
+        // 与 A11yBackend、能力清单读的是同一个数（同一条 trustedDisplayReady() 判据）。
+        trustedDisplayId = { if (trustedDisplayReady()) shizukuBackend.displayId else -1 },
         paths = paths,
         runLog = runLog,
         auditLog = auditLog,
@@ -375,6 +433,10 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
         // 「谁也问不到人」时回包里点名该开哪个开关。判据在队列的裁决里（它才知道
         // 是通知被关、还是后台模式挡住了悬浮窗、还是两者都成立）。
         approvalDeadEnd = { approvalQueue.lastDeadEndReason() },
+        // 收尾回宿主这条豁免开不开：设置里可关，默认开着（行为与从前一致）。
+        hostBringToFrontEnabled = {
+            settings.bool(interlock.relay.core.settings.RelaySettings.HOST_BRING_TO_FRONT, true)
+        },
     )
 
     private val assets = GuestAssets(
@@ -443,11 +505,51 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
         // E_GATE_SYSTEM_MISSING 与执行期 A11yBackend 的 E_BACKEND_UNAVAILABLE），
         // 挂在判定上才不会漏掉其中一条。
         probe.onAccessibilityGap = { id, gap -> publishAccessibilityGap(id, gap) }
-        // 会改系统的动词能不能跑，取决于用户有没有在界面上把它打开：判据在偏好里，
-        // 而偏好只由界面上的开关写，助手侧没有任何路径能替它写。
-        shizukuBackend.shellOptInOpen = { verb -> shellOptIns.isOpen(verb) }
+        // [补丁] opt-in 动词（input / svc / media）默认放行：这里恒回 true，用户不必再去
+        // 危险能力页手动打开。为什么改这里而不是 ShellVerbs.plan 的默认值：plan 的默认值
+        // 在真实路径上用不到——ShizukuBackend 第 394 行调用时显式传了本 lambda，改默认值
+        // 等于没改。FORBIDDEN（rm/rmdir/dd/mkfs/sh/su/am/setprop…）是另一个集合，在 plan 里
+        // 先于本判据被拒，不受影响。
+        shizukuBackend.shellOptInOpen = { true }
         // 信箱已装配，挂起-续行的对接面接上真身：协调器从此能把「等用户答复」移出执行槽。
         parkBridge.delegate = mailbox
+        // 运行时配置中心接到三个消费点上：
+        // 1) 模板目录（免审批集合 / 自定义上屏动作 / 自定义设置页）——快照式，改动后重装；
+        // 2) 系统授权界面的判据（总开关 + 三张可编辑名单）；
+        // 3) 旧版 verbose 开关迁移进 schema，之后只有一个事实源。
+        applyIntentCatalog()
+        ConsentSurfaces.config = {
+            ConsentSurfaces.Config(
+                enabled = settings.bool(RelaySettings.CONSENT_ENABLED, true),
+                extraPackages = settings.stringSet(RelaySettings.CONSENT_EXTRA_PACKAGES),
+                packagePrefixes = settings.stringSet(RelaySettings.CONSENT_PREFIXES).toList(),
+                viewIdKeywords = settings.stringSet(RelaySettings.CONSENT_VIEW_IDS).toList(),
+                relativeIsConsent = settings.bool(RelaySettings.CONSENT_RELATIVE, true),
+            )
+        }
+        if (settings.isDefault(RelaySettings.VERBOSE_LOG) &&
+            prefsApi.getBoolean(RelayPrefs.FILE_MAIN, KEY_VERBOSE, false)
+        ) {
+            settings.put(RelaySettings.VERBOSE_LOG, "true")
+        }
+    }
+
+    /** 把设置里的模板相关三项装进目录快照。任何一次写入之后都要重装，否则闸门还按旧的判。 */
+    private fun applyIntentCatalog() {
+        interlock.relay.core.exec.direct.IntentTemplateCatalog.install(
+            interlock.relay.core.exec.direct.IntentTemplateCatalog.Config(
+                screenOnlyTemplates = settings.stringSet(
+                    RelaySettings.SCREEN_ONLY_TEMPLATES,
+                    interlock.relay.core.exec.direct.IntentTemplateCatalog.Config.BUILTIN.screenOnlyTemplates,
+                ),
+                pages = interlock.relay.core.exec.direct.IntentTemplateCatalog.decodePages(
+                    settings.raw(RelaySettings.SETTINGS_PAGES),
+                ),
+                templates = interlock.relay.core.exec.direct.IntentTemplateCatalog.decodeTemplates(
+                    settings.raw(RelaySettings.USER_TEMPLATES),
+                ),
+            ),
+        )
     }
 
     /**
@@ -961,7 +1063,11 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
         // 标记按线程打，见 [listingThread] 的理由。
         listingThread.set(true)
         try {
-            return capabilities.all().map { descriptor ->
+            return capabilities.all().map { raw ->
+                // 上限可以被用户在设置里逐条覆盖（默认空表 = 编译期值）。这里把覆盖后的
+                // 描述符铺给界面与能力清单，因此"界面显示的档位上限"与"闸门实际用的上限"
+                // 永远是同一个数 —— 两处各读一次就会漂移。
+                val descriptor = raw.copy(ceiling = settings.ceilingOf(raw.id, raw.ceiling))
                 // 先裁决路线，再按**这条路线**探测系统权限：同一能力在不同路线上需要的
                 // 系统条件不同（坐标四条走可信屏就不需要无障碍）。先探测后裁决会拿
                 // 「另一条路」的权限状态写清单，与真调用对不上。
@@ -1217,6 +1323,10 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
                     put("minSdk", descriptor.minSdk)
                     put("surfaces", JSONArray(descriptor.surfaces.map(SurfaceKind::wire)))
                     put("guide", descriptor.guideClass.name)
+                    // 这一条能力接受的顶层键，取自闸门之前那张预校验表（同一张表，不是另抄一份）：
+                    // 助手不必靠 unknown arg 的回包逐个试出形状。`ui.*` 那几条里的 `display`
+                    // 就是从这里被看见的（语义见 backend.displayTarget）。
+                    put("args", JSONArray(CapabilityArgsSpec.allowedKeys(descriptor.id)))
                     row.surface?.let { put("surface", it.wire) }
                     row.degradeReason?.let { put("degradeReason", it) }
                     if (!row.implemented) put("reason", "not_implemented")
@@ -1255,6 +1365,29 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
                         put("nodeTree", a11yBackend.trustedNodeTreeState(shizukuBackend.displayId))
                     })
                 })
+            })
+            // `ui.*` 的可选目标屏键：键名、接受它的能力、可填的编号各从唯一事实源取
+            // （DisplayTarget），不在这里另抄一份名单 —— 抄一份就会与闸门那张表漂移。
+            put("displayTarget", JSONObject().apply {
+                put("key", DisplayTarget.KEY_DISPLAY)
+                put("type", "integer")
+                put("optional", true)
+                put(
+                    "description",
+                    "ui.* 里读树与坐标注入那几条可以点名本次落在哪块屏上。" +
+                        "不传这个键时落点仍由用户的执行模式偏好裁决，行为与从前逐字节相同。",
+                )
+                put(
+                    "values",
+                    JSONObject().apply {
+                        put(DisplayTarget.DEFAULT_DISPLAY.toString(), "the screen the user is looking at (foreground surface)")
+                        put(
+                            "backend.shizuku.trustedDisplay.displayId",
+                            "the trusted virtual display (trusted-display surface); -1 means none exists right now",
+                        )
+                    },
+                )
+                put("capabilities", JSONArray(DisplayTarget.CAPABILITIES.map { it.wire }.sorted()))
             })
             put("capabilities", array)
         }.toString(2) + "\n"
@@ -1329,8 +1462,141 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
     fun isVerboseLog(): Boolean = verbosePref()
 
     fun setVerboseLog(enabled: Boolean) {
+        // 唯一事实源从此是 schema 那一项；旧键一并写，是为了让"降级回旧版本"也能读到同一个值。
+        settings.put(RelaySettings.VERBOSE_LOG, enabled.toString())
         prefsApi.putBoolean(RelayPrefs.FILE_MAIN, KEY_VERBOSE, enabled)
+        scheduleRefresh()
     }
+
+    // ───────────────────────── 运行时配置中心（界面用） ─────────────────────────
+
+    /** 一条配置在界面上的完整状态：声明 + 当前值 + 显示值 + 是否默认。 */
+    data class SettingRow(
+        val spec: RelaySettings.Spec,
+        val value: String,
+        val display: String,
+        val isDefault: Boolean,
+        val readOnlyNote: String?,
+        val children: List<SettingRow>,
+    )
+
+    /**
+     * 按分组铺出配置表。危险项的子规则挂在父项下面，不在组里单独出一行。
+     *
+     * 未接线项（`wired = false`）默认**不出现**：它们改了不生效，露在外面会被读成"程序坏了"。
+     * 只有用户在「显示未接线项（开发预览）」里显式打开，才一并铺出来（那时界面顶上带黄色说明）。
+     */
+    fun settingsRows(group: RelaySettings.Group): List<SettingRow> {
+        val showUnwired = showUnwired()
+        return RelaySettings.inGroup(group)
+            .filterNot { RelaySettings.isHidden(it, showUnwired) }
+            .map { spec -> settingRow(spec) }
+    }
+
+    /** 是否显示未接线项（开发预览开关）。 */
+    fun showUnwired(): Boolean = settings.bool(RelaySettings.SHOW_UNWIRED, false)
+
+    /** 危险项的确认方式：`HOLD`（长按）或 `PHRASE`（输入短语）。 */
+    fun confirmMode(): String = settings.string(RelaySettings.CONFIRM_MODE, RelaySettings.CONFIRM_HOLD)
+
+    private fun settingRow(spec: RelaySettings.Spec): SettingRow = SettingRow(
+        spec = spec,
+        value = settings.raw(spec.id),
+        display = settings.display(spec),
+        isDefault = settings.isDefault(spec.id),
+        readOnlyNote = RelaySettings.readOnlyNote(spec),
+        children = RelaySettings.childrenOf(spec.id)
+            .filterNot { RelaySettings.isHidden(it, showUnwired()) }
+            .map { settingRow(it) },
+    )
+
+    /** 写入一项。返回 null 表示成功；否则是一句给用户看的原因。 */
+    fun setSetting(id: String, encoded: String): String? {
+        val error = settings.put(id, encoded) ?: run {
+            applyIntentCatalog()
+            scheduleRefresh()
+            null
+        }
+        return error
+    }
+
+    /** 恢复默认（单条 / 一组 / 全部）。返回被改回的项，界面据此给回执。 */
+    fun resetSettings(ids: List<String>): List<String> {
+        val touched = settings.reset(ids)
+        if (touched.isNotEmpty()) {
+            applyIntentCatalog()
+            scheduleRefresh()
+        }
+        return touched.map { it.title }
+    }
+
+    fun resetSettingsGroup(group: RelaySettings.Group): List<String> {
+        val touched = settings.resetGroup(group)
+        if (touched.isNotEmpty()) {
+            applyIntentCatalog()
+            scheduleRefresh()
+        }
+        return touched.map { it.title }
+    }
+
+    fun resetAllSettings(): List<String> {
+        val touched = settings.resetAll()
+        if (touched.isNotEmpty()) {
+            applyIntentCatalog()
+            scheduleRefresh()
+        }
+        return touched.map { it.title }
+    }
+
+    /**
+     * 首屏"当前策略"：一两句人话把当前配置总结出来，随配置实时更新。
+     *
+     * 这里读的是真判定（免审批集合、能力档位、consentScreen 总开关），而不是把用户的选择
+     * 复述一遍 —— 复述会与真实行为漂移，而这一句的全部价值就是"我现在的处境是什么"。
+     */
+    fun settingsOverview(): List<String> {
+        val screenOnly = settings.stringSet(RelaySettings.SCREEN_ONLY_TEMPLATES)
+        val quiet = mutableListOf<String>()
+        if ("settings.open" in screenOnly) quiet += "打开系统页面"
+        if (tiers.tierOf(CapabilityId.UI_CLICK) == AccessTier.ALWAYS) quiet += "点击普通应用"
+        val lines = mutableListOf<String>()
+        lines += if (quiet.isEmpty()) {
+            "当前：助手每做一步都会先问你。"
+        } else {
+            "当前：助手${quiet.joinToString("、")}时不会打扰你。"
+        }
+        lines += if (settings.bool(RelaySettings.CONSENT_ENABLED, true)) {
+            "操作系统设置里的控件、点别的 App 的权限框，会先问你。"
+        } else {
+            "注意：你已经关掉了系统授权框的保护 —— 助手可能替你点掉别的 App 的权限弹框。"
+        }
+        val changed = settings.changed()
+        lines += if (changed.isEmpty()) {
+            "我改过哪些项：还没有，全部是默认值。"
+        } else {
+            "我改过哪些项：" + changed.joinToString("、") { it.title }
+        }
+        return lines
+    }
+
+    fun exportSettings(): String = settings.exportJson()
+
+    /** 导入结果直通给界面：先展示差异与风险项，用户确认后才写入。 */
+    fun importSettings(text: String): SettingsStore.ImportResult {
+        val result = settings.importJson(text)
+        if (result.ok && result.applied.isNotEmpty()) {
+            applyIntentCatalog()
+            scheduleRefresh()
+        }
+        return result
+    }
+
+    /** 上限覆盖表的原始 JSON：能力上限那个专用编辑器读写它。 */
+    fun ceilingOverridesJson(): String = settings.raw(RelaySettings.CEILING_OVERRIDES)
+
+    /** 一条能力当前实际生效的上限（已被用户覆盖就用覆盖值）。 */
+    fun effectiveCeiling(descriptor: CapabilityDescriptor): TierCeiling =
+        settings.ceilingOf(descriptor.id, descriptor.ceiling)
 
     fun isChannelRunning(): Boolean = mailbox.isRunning
 
@@ -1364,6 +1630,15 @@ class RelayContainer(context: Context, config: RelayConfig = RelayConfig()) {
         const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         const val KEY_SALT = "digest_salt"
         const val KEY_VERBOSE = "verbose_log"
+
+        /** 配置变更审计文件名（落在 auditDir，宿主私有、不在沙盒绑定子树内）。 */
+        const val SETTINGS_AUDIT_FILE = "settings.log"
+
+        /**
+         * 审计单文件尺寸上限。超过就滚一次：`settings.log` → `.1` → `.2`，最老的删掉，
+         * 也就是"单文件 ≤1 MB、最多 3 份"。手机上的日志不能无限长。
+         */
+        const val SETTINGS_AUDIT_MAX_BYTES = 1024L * 1024L
         const val SALT_BYTES = 16
         const val DIAGNOSTIC_AUDIT_LINES = 40
     }

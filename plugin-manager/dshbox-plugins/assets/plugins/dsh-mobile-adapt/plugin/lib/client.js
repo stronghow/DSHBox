@@ -984,6 +984,9 @@ window.__ModuleLoader__.load({
       var UPLOAD_SENTINEL = 'application/x-dshbox-sandbox-upload';
       var CAMERA_PHOTO_SENTINEL = 'application/x-dshbox-camera-photo';
       var CAMERA_VIDEO_SENTINEL = 'application/x-dshbox-camera-video';
+      // ①「上传手机文件」：原生侧要把选中的文件**复制**到自己目录后以 FileProvider URI 回填
+      // （外部 content:// 直接回填页面读不到字节，就是「选完就丢」）。
+      var PHONE_FILE_SENTINEL = 'application/x-dshbox-phone-file';
 
       var UPLOAD_TEXT = {
         zh: {
@@ -1185,6 +1188,7 @@ window.__ModuleLoader__.load({
 
       /** 来源 → 传给原生的 accept 哨兵；空串表示「任意类型」（手机文件走系统选择器）。 */
       function sentinelFor(source) {
+        if (source === 'phone') return PHONE_FILE_SENTINEL;
         if (source === 'sandbox') return UPLOAD_SENTINEL;
         if (source === 'camera-photo') return CAMERA_PHOTO_SENTINEL;
         if (source === 'camera-video') return CAMERA_VIDEO_SENTINEL;

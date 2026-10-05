@@ -95,6 +95,8 @@ import interlock.relay.core.surface.SurfacePreference
 sealed class PilotDestination {
     data object Overview : PilotDestination()
     data object Capabilities : PilotDestination()
+    /** 规则与配置：整页由 core 的配置声明表渲染，见 [RulesPage]。 */
+    data object Rules : PilotDestination()
     data object Surface : PilotDestination()
     data object Accessibility : PilotDestination()
     data object Privileged : PilotDestination()
@@ -177,6 +179,12 @@ fun PilotScreen(container: RelayContainer, onBack: () -> Unit) {
                         state = state,
                         onOpenDetail = { open(PilotDestination.Detail(it)) },
                         onSetTier = viewModel::setTier,
+                    )
+
+                    PilotDestination.Rules -> RulesPage(
+                        state = state,
+                        viewModel = viewModel,
+                        open = open,
                     )
 
                     is PilotDestination.Detail -> DetailPage(
@@ -264,6 +272,7 @@ private fun PilotTopBar(titleRes: Int, onBack: () -> Unit) {
 private fun destinationTitleRes(destination: PilotDestination): Int = when (destination) {
     PilotDestination.Overview -> R.string.pilot_page_overview
     PilotDestination.Capabilities -> R.string.pilot_page_capabilities
+    PilotDestination.Rules -> R.string.pilot_page_rules
     PilotDestination.Surface -> R.string.pilot_page_surface
     PilotDestination.Accessibility -> R.string.pilot_page_accessibility
     PilotDestination.Privileged -> R.string.pilot_page_privileged
@@ -347,6 +356,12 @@ private fun OverviewPage(
 
     // 闸门条目只留文字：状态由点进去的那一页说明，行首不再画圆点。
     PilotSection(title = stringResource(R.string.pilot_section_entries)) {
+        // 规则与配置放在第一个：它是"改行为"的地方，其余几页是"看状态"的地方。
+        PilotActionRow(
+            title = stringResource(R.string.pilot_page_rules),
+            onClick = { open(PilotDestination.Rules) },
+        )
+        PilotDivider()
         PilotActionRow(
             title = stringResource(R.string.pilot_page_capabilities),
             onClick = { open(PilotDestination.Capabilities) },

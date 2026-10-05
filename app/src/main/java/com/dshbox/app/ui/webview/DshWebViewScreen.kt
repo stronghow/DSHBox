@@ -29,6 +29,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import android.webkit.MimeTypeMap
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -162,6 +163,40 @@ internal const val CAMERA_PHOTO_SENTINEL = "application/x-dshbox-camera-photo"
 internal const val CAMERA_VIDEO_SENTINEL = "application/x-dshbox-camera-video"
 
 /**
+ * 「上传手机文件」（系统「文件 / 相册」选择器）的 accept 哨兵（1.4.1 增量修正）。
+ *
+ * 修正的正是**唯一坏掉的那条来源**：插件菜单第①项过去不带哨兵，宿主因此落到
+ * `fileChooserParams.createIntent()`，结果经 `FileChooserParams.parseResult` 把
+ * **外部 provider 的裸 `content://`** 直接交给页面；那个 URI 的读授权只属于本进程，
+ * 页面拿不到可用字节，DSH 的上传逻辑静默结束（现象：选完聊天框空白、附件目录 0 新增）。
+ *
+ * 现在这条路与「拍照 / 录像」同构：原生先把字节**复制**进本应用目录，再以
+ * FileProvider URI 回填。必须与 `assets/plugins/dsh-mobile-adapt/plugin/lib/client.js`
+ * 的 `PHONE_FILE_SENTINEL` 保持一致。
+ */
+internal const val PHONE_FILE_SENTINEL = "application/x-dshbox-phone-file"
+
+/**
+ * 手机文件选中的副本暂存目录名（`cacheDir` 之下）。
+ *
+ * 必须与 `res/xml/file_paths.xml` 的 `phone_pick` 授权根 `path` 一致，
+ * 否则 `FileProvider.getUriForFile` 抛异常、这条来源静默不可用。
+ */
+internal const val PHONE_PICK_DIR_NAME = "phone-pick"
+
+/**
+ * 副本的工作区落点（相对 `filesDir`）：`user-data/inbox/`。
+ *
+ * `user-data` 经 PRoot `--bind=user-data:/root/projects` 就是 guest 的
+ * `/root/projects`（与 [SETTINGS_DOCUMENT_RELATIVE_PATH] 同一份依据），
+ * 因此这里即容器内 `/root/projects/inbox/`：agent 侧可直接读同一份字节。
+ */
+internal const val INBOX_RELATIVE_PATH = "user-data/inbox"
+
+/** 本文件内所有补丁日志的统一标签，便于一条 grep 收全。 */
+internal const val PATCH_LOG_TAG = "DSHBoxPatch"
+
+/**
  * 相机拍摄输出的暂存目录名（`cacheDir` 之下）。
  *
  * 必须与 `res/xml/file_paths.xml` 的 `camera_capture` 授权根 `path` 一致 ——
@@ -171,7 +206,7 @@ internal const val CAMERA_VIDEO_SENTINEL = "application/x-dshbox-camera-video"
 internal const val CAPTURE_DIR_NAME = "camera-capture"
 
 /** 附件上传来源。 */
-internal enum class UploadSource { PHONE, SANDBOX, CAMERA_PHOTO, CAMERA_VIDEO }
+internal enum class UploadSource { PHONE, PHONE_FILE, SANDBOX, CAMERA_PHOTO, CAMERA_VIDEO }
 
 /**
  * 一次 `onShowFileChooser` 请求的快照。
@@ -202,6 +237,53 @@ internal class FileChooserRequest(
  */
 internal const val DSHBOX_SCHEME = "dshbox"
 internal const val DSHBOX_ACTION_SETTINGS_DOCUMENT = "open-settings-document"
+
+/**
+ * 「上传手机文件」的导入：把选中的外部文件**复制**进本应用的受控目录，
+ * 铸成 FileProvider URI 交回页面。
+ *
+ * 复制是这条路径的关键：`ACTION_OPEN_DOCUMENT` / `ACTION_GET_CONTENT` 回来的是
+ * 外部 provider 的 `content://`，其读授权只落在发起请求的本进程；把它原样回填，
+ * 页面拿到的是一个读不到字节的裸 URI。相机路径之所以一直好用，正是因为它回填的是
+ * 本应用 FileProvider 自己的 URI（见 [createCaptureRequest]）。
+ *
+ * 副产物：同一份字节再落到工作区 `user-data/inbox/`（容器内 `/root/projects/inbox/`），
+ * agent 侧无需附件通道即可直读。写操作只发生在这两个目录内。
+ *
+ * @return 铸好的 FileProvider URI；复制失败或读不到字节时返回 null（调用方以取消结清）。
+ */
+private fun importPickedFile(context: Context, source: Uri): Uri? = runCatching {
+    val resolver = context.contentResolver
+    val mime = resolver.getType(source)
+    val fromMime = mime?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+    val fromName = source.lastPathSegment?.substringAfterLast('.', "")
+        ?.takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) }
+    val ext = fromMime ?: fromName ?: "bin"
+    val stamp = System.currentTimeMillis()
+    val dir = File(context.cacheDir, PHONE_PICK_DIR_NAME)
+    if (!dir.isDirectory && !dir.mkdirs()) {
+        Log.w(PATCH_LOG_TAG, "手机文件导入：暂存目录建不出来 $dir")
+        return@runCatching null
+    }
+    val file = File(dir, "phone-$stamp.$ext")
+    val copied = resolver.openInputStream(source)?.use { input ->
+        file.outputStream().use { output -> input.copyTo(output) }
+    }
+    if (copied == null || file.length() <= 0L) {
+        Log.w(PATCH_LOG_TAG, "手机文件导入：读不到字节（$source）")
+        return@runCatching null
+    }
+    Log.i(PATCH_LOG_TAG, "手机文件导入：已复制 ${file.length()} 字节 → $file（mime=${mime ?: "?"}）")
+    runCatching {
+        val inbox = File(context.filesDir, INBOX_RELATIVE_PATH)
+        if (inbox.isDirectory || inbox.mkdirs()) {
+            val dest = File(inbox, "phone-$stamp.$ext")
+            file.copyTo(dest, overwrite = true)
+            Log.i(PATCH_LOG_TAG, "手机文件导入：工作区副本 $dest")
+        }
+    }.onFailure { Log.w(PATCH_LOG_TAG, "手机文件导入：工作区副本失败", it) }
+    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}.onFailure { Log.w(PATCH_LOG_TAG, "手机文件导入失败", it) }.getOrNull()
 
 /**
  * DSH 配置文件相对 `filesDir` 的位置。
@@ -463,6 +545,34 @@ internal class DshWebContainer(
     }
 
     /**
+     * 「上传手机文件」（修正）：`ACTION_OPEN_DOCUMENT` + `CATEGORY_OPENABLE`，MIME 全放行
+     *（文件与相册都能选到），取不到处理器时退回 `ACTION_GET_CONTENT`。
+     *
+     * 与 [createCaptureRequest] 同构：意图由原生准备，**结果由本应用复制**后再回填；
+     * 相册/文档提供者给的是外部 URI，直接回填页面读不到（见 [PHONE_FILE_SENTINEL]）。
+     *
+     * @param multiple 页面声明的 `multiple`（`MODE_OPEN_MULTIPLE`）：为真时系统选择器才允许
+     *   多选，结果经 `clipData` 逐项回传（见 [phonePickLauncher]）。
+     * @return null 表示两种选择器都不可用，调用方以取消结清回调。
+     */
+    private fun createPhoneFileRequest(multiple: Boolean): FileChooserRequest? {
+        val open = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+        val fallback = Intent(Intent.ACTION_GET_CONTENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+        val intent = when {
+            open.resolveActivity(context.packageManager) != null -> open
+            fallback.resolveActivity(context.packageManager) != null -> fallback
+            else -> return null
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        return FileChooserRequest(UploadSource.PHONE_FILE, multiple = multiple, systemIntent = intent)
+    }
+
+    /**
      * 把选择器结果回填给 WebView（[uris] 为 null 表示用户取消）。
      *
      * 包 `runCatching`：结果可能晚于容器销毁才回来，此时底层 WebView 已 destroy，
@@ -678,6 +788,8 @@ internal class DshWebContainer(
                         UploadSource.CAMERA_PHOTO
                     accepts.any { it.equals(CAMERA_VIDEO_SENTINEL, ignoreCase = true) } ->
                         UploadSource.CAMERA_VIDEO
+                    accepts.any { it.equals(PHONE_FILE_SENTINEL, ignoreCase = true) } ->
+                        UploadSource.PHONE_FILE
                     else -> UploadSource.PHONE
                 }
                 val multiple = fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE
@@ -688,6 +800,8 @@ internal class DshWebContainer(
                         // 相机侧由本容器准备意图与输出落点（需要 Activity 上下文与 FileProvider）。
                         UploadSource.CAMERA_PHOTO, UploadSource.CAMERA_VIDEO ->
                             createCaptureRequest(source)
+                        // 手机文件：原生起「文件 / 相册」选择器，结果复制进自家目录后回填。
+                        UploadSource.PHONE_FILE -> createPhoneFileRequest(multiple)
                         // 手机文件走系统选择器：意图由 FileChooserParams 按 accept 生成。
                         UploadSource.PHONE ->
                             FileChooserRequest(source, multiple, fileChooserParams.createIntent())
@@ -867,6 +981,40 @@ fun DshWebViewScreen(
         val uris = FileChooserParams.parseResult(result.resultCode, result.data)
         // 优先投递给发起者；发起者已不可达时退回当前容器（同样是 null 才是真丢弃）。
         (owner ?: webContainer)?.submitFileChooserResult(uris)
+    }
+
+    // 「上传手机文件」（修正）—— 与文件选择器同一套"记住发起者"的约定，但结果必须先
+    // 复制：外部 content:// 的读授权只属于本进程，直接回填就是「选完就丢」。
+    // 复制放到后台线程，避免大文件阻塞结果回调。
+    val phonePickOwner = remember { mutableStateOf<DshWebContainer?>(null) }
+
+    val phonePickLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val owner = phonePickOwner.value
+        phonePickOwner.value = null
+        val target = owner ?: webContainer
+        // 多选时系统把选中项全部塞进 clipData（data 只给第一项或为空），必须按项取；
+        // 单选仍然只有 data.data 一处（clipData 也可能只含一项，等价归入这条）。
+        val payload = result.data
+        val clip = payload?.clipData
+        val picked: List<Uri> = if (clip != null && clip.itemCount > 0) {
+            (0 until clip.itemCount).mapNotNull { clip.getItemAt(it)?.uri }
+        } else {
+            listOfNotNull(payload?.data)
+        }
+        if (result.resultCode != Activity.RESULT_OK || picked.isEmpty()) {
+            target?.submitFileChooserResult(null)
+        } else {
+            Thread {
+                // 逐项走同一条导入路径（复制进自家目录 + 铸 FileProvider URI），
+                // 最后一次性回填整个数组——页面需要 N 个 URI 才会出现 N 个附件。
+                val uris = picked.mapNotNull { importPickedFile(context, it) }.toTypedArray()
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    target?.submitFileChooserResult(if (uris.isEmpty()) null else uris)
+                }
+            }.start()
+        }
     }
 
     // Web 能力请求（DSH 语音输入的录音）—— 系统运行时权限的请求与回填。
@@ -1082,6 +1230,17 @@ fun DshWebViewScreen(
                                     }
                                 }
                                 UploadSource.SANDBOX -> sandboxPick = request.multiple
+                                UploadSource.PHONE_FILE -> {
+                                    // 结果由 phonePickLauncher 复制后回填（见其注释）。
+                                    phonePickOwner.value = owner
+                                    val intent = request.systemIntent
+                                    val launched = intent != null &&
+                                        runCatching { phonePickLauncher.launch(intent) }.isSuccess
+                                    if (!launched) {
+                                        phonePickOwner.value = null
+                                        owner.submitFileChooserResult(null)
+                                    }
+                                }
                                 UploadSource.CAMERA_PHOTO, UploadSource.CAMERA_VIDEO -> {
                                     cameraOwner.value = owner
                                     pendingCapture.value = request

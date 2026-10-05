@@ -165,6 +165,12 @@
     <string name="files_entry_directory">Folder</string>
     <string name="files_error_title">Operation failed</string>
     <string name="files_exit_dirty_block">Built-in editor has unsaved changes. Save or discard them before editing externally.</string>
+    <string name="files_exit_install">Install</string>
+    <string name="files_exit_copy_path">Copy path</string>
+    <string name="files_exit_copy_path_done">Path copied</string>
+    <string name="files_exit_copy_path_failed">Could not access the clipboard</string>
+    <string name="files_preview_unavailable">Cannot preview</string>
+    <string name="files_preview_unavailable_hint">This file type has no built-in preview. Use one of the actions below.</string>
     <string name="files_exit_export">Export</string>
     <string name="files_exit_external_edit">Edit externally</string>
     <string name="files_exit_external_open">Open externally</string>

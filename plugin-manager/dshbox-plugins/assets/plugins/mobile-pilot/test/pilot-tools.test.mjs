@@ -1944,6 +1944,111 @@ test('ask 的错误码都有处置建议，且不教人无脑重发', () => {
   assert.match(hintFor({ code: 'E_ASK_TIMEOUT' }), /重问|重新问/)
 })
 
+// ── 可选目标屏：display 的声明面与转发面 ─────────────────────────────
+/**
+ * 收 `display` 的工具名单必须与宿主的 `DisplayTarget.CAPABILITIES` 对齐，
+ * 而**不传时 payload 里不能出现这个键** —— 「与从前一致」靠的正是键真的没出现，
+ * 用 `|| 0` 之类补默认值会把每一次老调用悄悄改道到主屏。
+ */
+test('只有读树、坐标注入与启动那几条工具声明 display，且不传就不出现在 payload 里', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-display-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { byName, channel } = toolsWith({ ok: true, data: {} }, dir)
+
+  const takesDisplay = [
+    'phone_observe', 'phone_click', 'phone_setValue', 'phone_scroll',
+    'phone_node', 'phone_waitFor', 'phone_key', 'phone_launch',
+  ]
+  for (const name of takesDisplay) {
+    assert.ok(byName[name].parameters.display, `${name} 应声明 display`)
+    assert.equal(byName[name].parameters.display.type, 'integer', `${name}.display 应为 integer`)
+    assert.ok(!byName[name].parameters.display.required, `${name}.display 不该是必填`)
+  }
+  for (const name of [
+    'phone_status', 'phone_call', 'phone_capture',
+    'phone_intent', 'phone_surface', 'phone_ask',
+  ]) {
+    assert.ok(!byName[name].parameters.display, `${name} 不该声明 display`)
+  }
+
+  // 不传：payload 里没有这个键（既不是 undefined 也不是 0）。
+  channel.calls.length = 0
+  await byName.phone_click.execute({ nodeId: 5 })
+  assert.deepEqual(channel.calls.at(-1).args, { nodeId: 5 })
+  assert.ok(!('display' in channel.calls.at(-1).args), '不传 display 时不该补出这个键')
+
+  // 传 0 也要原样带上：0 是有意义的编号，不能被当成"没传"。
+  channel.calls.length = 0
+  await byName.phone_click.execute({ nodeId: 5, display: 0 })
+  assert.deepEqual(channel.calls.at(-1).args, { nodeId: 5, display: 0 })
+
+  channel.calls.length = 0
+  await byName.phone_click.execute({ selector: { text: '确定' }, display: 2 })
+  assert.deepEqual(channel.calls.at(-1).args, { selector: { text: '确定' }, display: 2 })
+
+  for (const [name, invoke, want, argv, wantDisplay] of [
+    ['phone_observe', (a) => byName.phone_observe.execute(a), 'ui.snapshot', { display: 0 }, 0],
+    ['phone_node', (a) => byName.phone_node.execute(a), 'ui.node', { nodeId: 1, display: 2 }, 2],
+    ['phone_setValue', (a) => byName.phone_setValue.execute(a), 'ui.setValue', { nodeId: 1, text: 'a', display: 2 }, 2],
+    ['phone_scroll', (a) => byName.phone_scroll.execute(a), 'ui.scroll', { nodeId: 1, direction: 'forward', display: 2 }, 2],
+    ['phone_waitFor', (a) => byName.phone_waitFor.execute(a), 'ui.waitFor', { nodeId: 1, text: 'a', display: 2 }, 2],
+    ['phone_key', (a) => byName.phone_key.execute(a), 'ui.key', { key: 'back', display: 2 }, 2],
+  ]) {
+    channel.calls.length = 0
+    await invoke(argv)
+    const call = channel.calls.at(-1)
+    assert.equal(call.capability, want, `${name} 应调 ${want}`)
+    assert.equal(call.args.display, wantDisplay, `${name} 没把 display 原样转发进 payload：${JSON.stringify(call.args)}`)
+  }
+
+  // 启动也认这个键：投送到哪块屏由调用方点名，不传时 payload 里就没有这个键。
+  channel.calls.length = 0
+  await byName.phone_launch.execute({ package: 'com.example.app' })
+  assert.equal(channel.calls.at(-1).capability, 'app.launch')
+  assert.deepEqual(channel.calls.at(-1).args, { package: 'com.example.app' })
+  channel.calls.length = 0
+  await byName.phone_launch.execute({ package: 'com.example.app', display: 0 })
+  assert.deepEqual(channel.calls.at(-1).args, { package: 'com.example.app', display: 0 })
+})
+
+// ── intent 定向：handler 的声明面与转发面 ────────────────────────────
+/**
+ * `handler` 说"这一发由哪个应用接"，与 `package`（app.info 展示哪个应用）不是一回事。
+ * 它必须原样出现在 payload 里、不填就一个键都不多 —— 多补一个空串会让宿主那一侧
+ * 把"没点名"读成"点名了一个不存在的包"。
+ */
+test('phone_intent 转发 handler，且不填就不出现在 payload 里', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-handler-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { byName, channel } = toolsWith({ ok: true, data: {} }, dir)
+
+  assert.ok(byName.phone_intent.parameters.handler, 'phone_intent 应声明 handler')
+  assert.equal(byName.phone_intent.parameters.handler.type, 'string')
+  assert.ok(!byName.phone_intent.parameters.handler.required, 'handler 不该是必填')
+
+  channel.calls.length = 0
+  await byName.phone_intent.execute({ template: 'web.open', url: 'https://example.com' })
+  assert.deepEqual(channel.calls.at(-1).args, { template: 'web.open', url: 'https://example.com' })
+  assert.ok(!('handler' in channel.calls.at(-1).args), '不填 handler 时不该补出这个键')
+
+  channel.calls.length = 0
+  await byName.phone_intent.execute({
+    template: 'web.open', url: 'https://example.com', handler: 'com.example.browser',
+  })
+  assert.deepEqual(channel.calls.at(-1).args, {
+    template: 'web.open', url: 'https://example.com', handler: 'com.example.browser',
+  })
+
+  // 两者同时在：package 是 intent 的对象，handler 是接收方。
+  channel.calls.length = 0
+  await byName.phone_intent.execute({
+    template: 'app.info', package: 'com.example.target', handler: 'com.example.settings',
+  })
+  assert.deepEqual(channel.calls.at(-1).args, {
+    template: 'app.info', package: 'com.example.target', handler: 'com.example.settings',
+  })
+})
+
 // ── 现场自检：端到端证据不许缺而不报 ─────────────────────────────────
 test('端到端现场自检：整批跳过就是没有证据，按失败收场而不是绿', () => {
   const declared = e2eRan.length + e2eSkipped.length

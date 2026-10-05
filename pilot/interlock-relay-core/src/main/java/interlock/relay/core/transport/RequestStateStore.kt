@@ -137,7 +137,19 @@ sealed interface DispatchGuardOutcome {
  * 不持久化请求参数：参数规范化原文含敏感内容，按设计重启后不恢复未完成请求，
  * 只以 [RequestState.mayHaveDispatched] 为界把结局收窄到两档可证的终态。
  *
- * 终态可重取性以**文件**为准：读不到、读坏了按不存在处理，内存里没有可信副本。
+ * 终态可重取性以**文件**为准：读不到、读坏了按不存在处理。内存里持一份**影子索引**
+ * （[IndexedState]：只存清理判定用得上的阶段与那两个时间戳，不存摘要、不存回包正文），
+ * 它的唯一职责是让「目录里有几条记录」与「哪几条到点了」变成 O(1) 与纯内存判定；
+ * [get] 每一次仍读文件，终态内容从不来自内存。
+ *
+ * 影子索引是实测逼出来的：目录里积了数千条记录（保留期决定它会到几千，而清理只认
+ * 30 分钟 / 24 小时两道时间线）时，原先 [create] 每次都要 `trackedCount()` 列一遍
+ * 目录、再因超限而 [purgeExpiredLocked] 把每个文件读出来做一次 JSON 解析。本机读数：
+ * 一条新请求的 1.5 s 里有 0.9–2.0 s 花在这里；同期 `/proc/<app>/io` 上多出
+ * 7.7k–16.8k 次 `read`、1.5–3.2 MB `rchar`、1.2–2.0 s 用户态 CPU，fds 停在
+ * `pilot-state/requests/<id>.json` 上；而幂等命中那支（不列目录、不清理）只要
+ * 4 次 `read`、1 ms。索引把 [create] 的热路径变成「一次文件读 + 一次文件写」。
+ *
  * id 前置条件：调用方传入的 id 必须已过通道白名单（[EnvelopeCodec.isValidId]），
  * 存储层不再复验——文件名由 id 直接拼出，这条前置一旦失守就是路径穿越。
  */
@@ -151,6 +163,25 @@ class RequestStateStore(
     private val lock = Any()
 
     /**
+     * 一条记录在影子索引里的样子：只有清理判定要用的四个字段。摘要、能力名、回包正文
+     * 都不进来 —— [get] 读文件，索引不被当成终态的来源；改动前先按 id 把文件读回来，
+     * 写出去的仍是文件此刻的内容。
+     */
+    private class IndexedState(
+        val phase: RequestPhase,
+        val terminal: Boolean,
+        val createdAtMs: Long,
+        val terminalAtMs: Long?,
+        val mayHaveDispatched: Boolean,
+    )
+
+    /** id → [IndexedState]。与 stateDir 同生共死：目录是本类独占的，没有第二个写者。 */
+    private val index = HashMap<String, IndexedState>()
+
+    /** 索引是否已与目录对齐过。未对齐时第一次取用会整目录读一遍（每个进程一次）。 */
+    private var indexSeeded = false
+
+    /**
      * 登记一条新请求。幂等：同 id 同摘要返回既有状态（[CreateOutcome.Existing]）；
      * 同 id 异摘要返回 [CreateOutcome.DigestConflict]，绝不覆盖——否则重放判据
      * 会被后来者改写。
@@ -158,6 +189,7 @@ class RequestStateStore(
     fun create(id: String, digest: String, capability: String, ttlMs: Long): CreateOutcome = synchronized(lock) {
         val existing = readState(target(id))
         if (existing != null) {
+            note(existing)
             return@synchronized if (existing.digest == digest) {
                 CreateOutcome.Existing(existing)
             } else {
@@ -166,6 +198,7 @@ class RequestStateStore(
         }
         // 防灌：目录超过上限先强制清理一轮。只清终态与过期条目，
         // 清完仍超限也照样登记——限流的职责在入口，这里只保证不无界膨胀。
+        // 计数与判定都走影子索引：热路径上不再有整目录 listFiles 与逐文件 JSON 解析。
         if (trackedCount() > MAX_TRACKED) purgeExpiredLocked(now())
         val state = RequestState(
             id = id,
@@ -288,54 +321,139 @@ class RequestStateStore(
      * 崩溃恢复扫描：把所有非终态请求按持久化边界收尾。可证未派发的以
      * [INTERRUPTED_BEFORE_EXECUTION] 终结（动作确实没发生），否则保守转
      * [UNKNOWN]。只提供扫描与收尾，是否、何时调用由上层决定。
+     *
+     * 这一趟本来就要把整目录读一遍，影子索引因此在这里顺手重建，而不是等到第一次
+     * [create] 再付一次同样的代价：装配根在控制服务起来之前调用本方法（见
+     * [MailboxServer.start]），于是索引在设备上总是「开服即已对齐」。
      */
     fun recoverUnfinished(): List<RequestState> = synchronized(lock) {
         val recovered = mutableListOf<RequestState>()
+        index.clear()
         for (file in stateFiles()) {
             val state = readState(file) ?: continue
-            if (state.isTerminal) continue
+            if (state.isTerminal) {
+                note(state)
+                continue
+            }
             val phase = if (state.mayHaveDispatched) {
                 RequestPhase.UNKNOWN
             } else {
                 RequestPhase.INTERRUPTED_BEFORE_EXECUTION
             }
             val settled = state.copy(phase = phase, terminalAtMs = now())
-            if (!persist(settled, force = false)) continue
+            if (!persist(settled, force = false)) {
+                // 收尾没落住：索引按读到的现状记，下一轮巡检会再试。
+                note(state)
+                continue
+            }
             runLog?.warn(LogSubsystem.TRANSPORT, LogEvent.REQUEST_RECOVERED, "id" to state.id, "phase" to phase.name)
             recovered.add(settled)
         }
+        indexSeeded = true
         recovered
     }
 
+    /**
+     * 保留期清理。与改动前的判定逐条等价（过期遗留先收尾、`EXPIRED` 满 24 小时删文件、
+     * 其余终态满 30 分钟清空回包），区别只在「先判定、后碰盘」：第一趟纯内存遍历，把
+     * 真正需要改动的 id 收进三张表，只有这些记录才去读文件、写文件。目录里几千条记录
+     * 而多数还没到点时，这一趟是零次 IO —— 改动前它是每次登记都要付一次的整目录读。
+     */
     private fun purgeExpiredLocked(nowMs: Long) {
-        for (file in stateFiles()) {
-            val state = readState(file) ?: continue
-            // 过期遗留的非终态记录先收尾成终态：它没有 terminalAt 可计保留期，
-            // 不收尾就会永久留在目录里；判定依据与启动恢复同一套持久化边界。
-            if (nonTerminalRecordExpired(state, nowMs)) {
-                val phase = if (state.mayHaveDispatched) {
-                    RequestPhase.UNKNOWN
-                } else {
-                    RequestPhase.INTERRUPTED_BEFORE_EXECUTION
-                }
-                persist(state.copy(phase = phase, terminalAtMs = nowMs), force = false)
+        alignIndexLocked()
+        var orphans: MutableList<String>? = null
+        var expiries: MutableList<String>? = null
+        var deletions: MutableList<String>? = null
+        for ((id, seen) in index) {
+            if (nonTerminalRecordExpired(seen.terminal, seen.createdAtMs, nowMs)) {
+                if (orphans == null) orphans = ArrayList()
+                orphans.add(id)
                 continue
             }
-            val terminalAt = state.terminalAtMs ?: continue
+            val terminalAt = seen.terminalAtMs ?: continue
             when {
                 // 先判删除再判过期：EXPIRED 自身也是终态，次序颠倒会互相覆盖。
-                state.phase == RequestPhase.EXPIRED && nowMs - terminalAt >= STATE_RETENTION_MS -> {
-                    runCatching { file.delete() }
+                seen.phase == RequestPhase.EXPIRED && nowMs - terminalAt >= STATE_RETENTION_MS -> {
+                    if (deletions == null) deletions = ArrayList()
+                    deletions.add(id)
                 }
 
-                state.phase != RequestPhase.EXPIRED && nowMs - terminalAt >= RESULT_RETENTION_MS -> {
-                    persist(
-                        state.copy(phase = RequestPhase.EXPIRED, resultJson = null),
-                        force = false,
-                    )
+                seen.phase != RequestPhase.EXPIRED && nowMs - terminalAt >= RESULT_RETENTION_MS -> {
+                    if (expiries == null) expiries = ArrayList()
+                    expiries.add(id)
                 }
             }
         }
+        orphans?.forEach { settleOrphanLocked(it, nowMs) }
+        expiries?.forEach { expireResultLocked(it) }
+        deletions?.forEach { deleteRecordLocked(it) }
+    }
+
+    /**
+     * 过期遗留的非终态记录收尾成终态，与启动恢复同一套持久化边界。文件读不回来时
+     * 与改动前一致：文件还在就留在索引里等下一轮，文件真没了才从索引摘掉。
+     */
+    private fun settleOrphanLocked(id: String, nowMs: Long) {
+        val current = readState(target(id))
+        if (current == null) {
+            forgetIfGoneLocked(id)
+            return
+        }
+        if (current.isTerminal) {
+            note(current)
+            return
+        }
+        val phase = if (current.mayHaveDispatched) {
+            RequestPhase.UNKNOWN
+        } else {
+            RequestPhase.INTERRUPTED_BEFORE_EXECUTION
+        }
+        persist(current.copy(phase = phase, terminalAtMs = nowMs), force = false)
+    }
+
+    /** 终态满 [RESULT_RETENTION_MS]：置 `EXPIRED` 并清空回包，文件留着供查询。 */
+    private fun expireResultLocked(id: String) {
+        val current = readState(target(id))
+        if (current == null) {
+            forgetIfGoneLocked(id)
+            return
+        }
+        if (current.isTerminal && current.phase != RequestPhase.EXPIRED) {
+            persist(current.copy(phase = RequestPhase.EXPIRED, resultJson = null), force = false)
+        } else {
+            // 索引落后于文件（不该发生）：按文件现状刷新，下一轮再判。
+            note(current)
+        }
+    }
+
+    /** `EXPIRED` 满 [STATE_RETENTION_MS]：删文件。删不掉就留在索引里下一轮再删。 */
+    private fun deleteRecordLocked(id: String) {
+        val file = target(id)
+        val gone = runCatching { file.delete() }.getOrDefault(false) || !file.exists()
+        if (gone) index.remove(id)
+    }
+
+    private fun forgetIfGoneLocked(id: String) {
+        if (!target(id).exists()) index.remove(id)
+    }
+
+    /** 索引与目录对齐一次（每个进程一次）：整目录读一遍，把判定用的四个字段记下来。 */
+    private fun alignIndexLocked() {
+        if (indexSeeded) return
+        indexSeeded = true
+        index.clear()
+        for (file in stateFiles()) readState(file)?.let { note(it) }
+    }
+
+    /** 登记一条记录在索引里的影子。落盘失败的路径不走这里：内存不得先于磁盘有假象。 */
+    private fun note(state: RequestState) {
+        index[state.id] = IndexedState(
+            phase = state.phase,
+            terminal = state.isTerminal,
+            createdAtMs = state.createdAtMs,
+            terminalAtMs = state.terminalAtMs,
+            mayHaveDispatched = state.mayHaveDispatched,
+        )
     }
 
     /** 通用状态改写：已终态不动，改完落盘失败按 null 处理（不给内存假象）。 */
@@ -386,12 +504,22 @@ class RequestStateStore(
     private fun stateFiles(): List<File> =
         stateDir.listFiles { file -> file.isFile && file.name.endsWith(JSON_SUFFIX) }?.toList() ?: emptyList()
 
-    private fun trackedCount(): Int = stateFiles().size
+    /**
+     * 目录里的记录条数。索引对齐后就是 `index.size` —— 热路径上不再 listFiles
+     * （改动前这一次列目录就发生在每个新请求上）。未对齐时先对齐一次。
+     */
+    private fun trackedCount(): Int {
+        alignIndexLocked()
+        return index.size
+    }
 
     /**
      * 原子写：临时文件 + 改名。[force] 为真时在改名前对文件内容做
      * [FileChannel.force]。目录项同步与断电注入验证是后续执行链路的课题，
      * 本层只承诺文件内容级持久化。
+     *
+     * 写成功才更新影子索引：落盘失败时内存里不得先有假象（调用方正是靠返回值
+     * 决定要不要继续执行）。
      */
     private fun persist(state: RequestState, force: Boolean): Boolean = runCatching {
         stateDir.mkdirs()
@@ -410,6 +538,7 @@ class RequestStateStore(
                 // 改名失败退到直接覆写兜底，保持账本与既有写路径同一策略。
                 target(state.id).writeText(toJson(state).toString(), StandardCharsets.UTF_8)
             }
+            note(state)
             true
         } finally {
             temp.delete()
@@ -501,7 +630,14 @@ class RequestStateStore(
          * 执行，巡检按持久化边界把它收尾成终态，交给既有保留期清理。
          */
         fun nonTerminalRecordExpired(state: RequestState, nowMs: Long): Boolean =
-            !state.isTerminal && nowMs - state.createdAtMs >= QuotaLedger.ORPHAN_REQUEST_TTL_MS
+            nonTerminalRecordExpired(state.isTerminal, state.createdAtMs, nowMs)
+
+        /**
+         * 同一条判据的字段版本：影子索引只持字段、不持整条 [RequestState]，判定逻辑
+         * 仍只有上面这一处实现（两个入口都落到这里），避免索引与文件两条路各写一套。
+         */
+        internal fun nonTerminalRecordExpired(isTerminal: Boolean, createdAtMs: Long, nowMs: Long): Boolean =
+            !isTerminal && nowMs - createdAtMs >= QuotaLedger.ORPHAN_REQUEST_TTL_MS
 
         private const val JSON_SUFFIX = ".json"
     }

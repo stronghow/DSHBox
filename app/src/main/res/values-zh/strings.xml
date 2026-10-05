@@ -155,6 +155,12 @@
     <string name="files_entry_directory">目录</string>
     <string name="files_error_title">操作失败</string>
     <string name="files_exit_dirty_block">内建编辑存在未保存修改，请先保存或放弃后再用外部应用编辑</string>
+    <string name="files_exit_install">安装</string>
+    <string name="files_exit_copy_path">复制路径</string>
+    <string name="files_exit_copy_path_done">已复制路径</string>
+    <string name="files_exit_copy_path_failed">无法访问剪贴板</string>
+    <string name="files_preview_unavailable">无法预览</string>
+    <string name="files_preview_unavailable_hint">此类型没有内建预览，可用下面的方式打开。</string>
     <string name="files_exit_export">导出</string>
     <string name="files_exit_external_edit">外部编辑</string>
     <string name="files_exit_external_open">外部打开</string>

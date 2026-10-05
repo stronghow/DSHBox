@@ -221,10 +221,36 @@ class GuestAssets(
                 cat {{CAPS}}
 
             Every entry has: id, category, systemPermission, assistantTier, ceiling,
-            usable, implemented, minSdk, surfaces, guide; usable entries also carry the
+            usable, implemented, minSdk, surfaces, guide, args; usable entries also carry the
             surface a call would run on, and an entry carries degradeReason when the mode
             the user asked for is not one this call can serve. Only usable=true can be
-            called today.
+            called today. `args` is the exact set of top-level keys that capability accepts,
+            taken from the same table the pre-gate check uses - read it instead of discovering
+            the shape one `unknown arg` at a time.
+            Choosing which screen a call runs on: by default the user's execution-mode
+            preference decides (their own screen, or the trusted virtual display when one
+            exists and they prefer background). The node-level `ui.*` calls, the ones that
+            inject coordinates - ui.snapshot, ui.node, ui.waitFor, ui.click, ui.longClick,
+            ui.select, ui.dismiss, ui.scroll, ui.setValue, ui.setProgress, ui.imeAction,
+            ui.tap, ui.swipe, ui.text, ui.key - and app.launch all take an optional
+            `display`, which overrides that preference for this one call. Two values are
+            accepted: 0 for the screen the user is looking at, and the number in
+            backend.shizuku.trustedDisplay.displayId for the trusted virtual display. Any
+            other number is refused with E_TRANSPORT_MALFORMED: those are the only two
+            screens this pack knows how to read or drive. Omit the key and nothing changes.
+            This is how you do both things at once - drive an app on the virtual display
+            while looking at, and tapping, the user's own screen:
+                {{ENTRY}} call ui.snapshot --json '{"display":0}'
+                {{ENTRY}} call ui.tap --json '{"display":0,"x":540,"y":1800}'
+                {{ENTRY}} call app.launch --json '{"package":"com.example.app","display":0}'
+            The reply's surface field says where the call actually ran
+            (foreground = the user's screen, trusted-display = the virtual one); naming a
+            display is not a degradation, so degraded stays false for it. For app.launch the
+            reply also carries display and landedOn: landedOn is the display the requested
+            package was actually verified on, and null means it was not verified anywhere
+            (read verified/observed then - never treat that as "it came up on screen 0").
+            A launch that came up on the user's own screen while a virtual one was asked for
+            is flagged grabbedUserScreen=true.
             The list has no timestamp field of its own. The file's modification time only says
             when the last successful write landed - it does not prove the content still matches
             the device. The host re-lays the file the moment a gate or the virtual display
@@ -288,6 +314,25 @@ class GuestAssets(
             delivery location and nothing host-side collects it. The delivery tree keeps the
             latest 20 files per kind, at most 256 MB and 7 days, and never collects anything
             modified within the last 10 minutes.
+
+            `sys.intent` puts a system page in front of the user through a closed table of
+            templates. Six of them - alarm.show, timer.show, settings.open, app.info, dial,
+            web.open - only bring a page up and change nothing, so they are never held for
+            approval whatever the assistant's tier is; the other two, alarm.set and timer.set,
+            really do create an alarm or a timer and stay behind the tier gate. The template
+            name is always required, and each template accepts only the keys listed in the
+            manifest entry's `args`.
+            Every template sends an implicit intent, so when several apps can handle it and no
+            default is set, the system puts its own chooser in front of the user for a moment
+            and the reply's resolvedPackage becomes com.android.intentresolver - "handed to the
+            chooser", which says nothing about which app took it. Pass the optional `handler`
+            (a package name) to pin the intent to one receiver: the call then goes straight
+            there without the chooser, and the reply carries pinned:true. A handler that cannot
+            handle that template's action is answered with E_TRANSPORT_MALFORMED and the reason
+            lists the packages that can (read it and retry with one of them). `handler` is not
+            `package`: `package` is which app app.info should show, `handler` is who receives
+            this intent. The reply also says viaResolver:true when the call did go through the
+            chooser.
 
             `home` brings the host app back to the front - a launcher start of the host
             package, so it lands on the host's own home page, which is where the user

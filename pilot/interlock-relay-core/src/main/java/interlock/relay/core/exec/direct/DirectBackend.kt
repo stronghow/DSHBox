@@ -36,12 +36,18 @@ import interlock.relay.core.exec.BackendResult
 import interlock.relay.core.exec.RelayBackend
 import interlock.relay.core.exec.a11y.RelayAccessibilityService
 import interlock.relay.core.storage.RelayPaths
+import interlock.relay.core.surface.DisplayTarget
 import interlock.relay.core.storage.StorageReaper
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
+import android.util.Log
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 宿主进程内直接调用平台接口。覆盖普通运行时权限即可达的数据与系统能力。
@@ -145,7 +151,13 @@ class DirectBackend(
             CapabilityId.CALENDAR_READ -> readCalendar(limitOf(call.args))
             CapabilityId.CALENDAR_WRITE -> writeCalendar(call.args)
             CapabilityId.LOCATION_READ -> readLocation()
-            CapabilityId.MEDIA_READ -> readMedia(call.args.optString(KEY_KIND, "image"), limitOf(call.args))
+            CapabilityId.MEDIA_READ -> readMedia(
+                call.args.optString(KEY_KIND, "image"),
+                // [补丁] limit 收紧到 1..20（见 MEDIA_LIMIT_MAX）。
+                limitOf(call.args).coerceAtMost(MEDIA_LIMIT_MAX),
+                // [补丁] export=true 才把字节复制进沙盒；缺省行为与旧版一致。
+                call.args.optBoolean(KEY_EXPORT, false),
+            )
             CapabilityId.MEDIA_WRITE -> writeMedia(call)
             CapabilityId.NOTIFY_POST -> postNotification(call.args)
             CapabilityId.NOTIFY_READ -> readNotifications(call.args)
@@ -211,37 +223,37 @@ class DirectBackend(
                 return BackendResult.Failed(RelayError.TRANSPORT_MALFORMED, outcome.reason)
             is IntentTemplates.Outcome.Ok -> outcome.params
         }
-        // `SKIP_UI` 只对那两条"替我设一下"的入口有语义；打开页面那一类本来就一定要上屏，
-        // 给它们塞这个 extra 只是让回包看起来都一样。
-        val intent = when (params.template) {
-            IntentTemplates.ALARM_SET -> Intent(AlarmClock.ACTION_SET_ALARM)
-                .putExtra(AlarmClock.EXTRA_HOUR, params.hour)
-                .putExtra(AlarmClock.EXTRA_MINUTES, params.minute)
-                .apply { params.message?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) } }
-                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            IntentTemplates.TIMER_SET -> Intent(AlarmClock.ACTION_SET_TIMER)
-                .putExtra(AlarmClock.EXTRA_LENGTH, params.lengthSeconds)
-                .apply { params.message?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) } }
-                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            IntentTemplates.ALARM_SHOW -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
-            IntentTemplates.TIMER_SHOW -> Intent(AlarmClock.ACTION_SHOW_TIMERS)
-            IntentTemplates.APP_INFO -> Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.fromParts("package", params.packageName, null),
-            )
-            IntentTemplates.DIAL -> Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", params.number, null))
-            IntentTemplates.WEB_OPEN -> Intent(Intent.ACTION_VIEW, Uri.parse(params.url))
-            else -> Intent(settingsAction(params.page))
-        }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val base = buildTemplateIntent(params)
+        // 调用方点了接收方：把这一发**钉在**那一个包上（隐式 action 不变，只把解析范围收窄到
+        // 它自己）。这一步就是"避开选择器"：多个候选时系统本来会弹一个选择器顶到最前面，
+        // 钉住之后直达那一个应用，回包的 `resolvedPackage` 也重新说得清是谁接的。
+        val intent = params.handler?.let { base.setPackage(it) } ?: base
 
         val target = runCatching {
             appContext.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
         }.getOrNull()
-            ?: return BackendResult.Failed(
+        if (target == null) {
+            // 点了名的包接不了这一发：这不是"这台机器没有接收方"，而是**点错了包**。
+            // 把真正的候选列出来，让调用方改一行就能成 —— 只回一句 "no app handles" 的话，
+            // 助手只能把表内每条模板都试一遍，而它甚至不知道候选是谁。
+            if (params.handler != null) {
+                val candidates = candidatesFor(base)
+                return BackendResult.Failed(
+                    RelayError.TRANSPORT_MALFORMED,
+                    "handler ${params.handler} does not handle ${base.action}: " +
+                        if (candidates.isEmpty()) {
+                            "no app on this device handles that action either"
+                        } else {
+                            "candidates are ${candidates.joinToString(", ")}"
+                        } + " (drop $KEY_HANDLER to let the system resolve it, or name one of those)",
+                )
+            }
+            return BackendResult.Failed(
                 RelayError.BACKEND_UNAVAILABLE,
                 "no app on this device handles ${intent.action}: a template that is in the table can still " +
                     "have no receiver here, which is a property of this device, not of the argument",
             )
+        }
         val top = foregroundPackage()
         if (top != appPackage && !overlayGranted()) {
             return BackendResult.Failed(
@@ -266,6 +278,11 @@ class DirectBackend(
                 .put("template", params.template)
                 .put("resolvedPackage", target.activityInfo.packageName)
                 .apply {
+                    // 点了接收方就如实报两件事：请求钉的是谁、以及"这一发没有走系统选择器"。
+                    // `resolvedPackage` 仍是实际落地的那一个（与 handler 不同就是系统换了人）。
+                    params.handler?.let { put(KEY_HANDLER, it) }
+                    if (params.handler != null) put("pinned", true)
+                    if (target.activityInfo.packageName == RESOLVER_PACKAGE) put("viaResolver", true)
                     // 只有那两条设闹钟/设计时器真的带 SKIP_UI，别照抄成"每条都不上屏"。
                     if (params.hour >= 0) put("skipUi", true).put("hour", params.hour).put("minute", params.minute)
                     if (params.lengthSeconds >= 0) put("skipUi", true).put("lengthSeconds", params.lengthSeconds)
@@ -275,9 +292,108 @@ class DirectBackend(
                     params.url?.let { put("url", it) }
                     params.message?.let { put("message", it) }
                 }
-                .put("note", handoffNote(params.template)),
+                .put("note", handoffNote(params.template) + if (params.handler != null) {
+                    " (pinned to ${params.handler}: the system resolver is out of this one)"
+                } else {
+                    ""
+                }),
         )
     }
+
+    /**
+     * 表内模板的参数 → 一条定形的隐式 intent。action 与 extra 的名字都不由助手给；
+     * 接收方也还没定（调用方点了名就在调用处 `setPackage`）。
+     */
+    private fun buildTemplateIntent(params: IntentTemplates.Params): Intent =
+        when (params.template) {
+            IntentTemplates.ALARM_SET -> Intent(AlarmClock.ACTION_SET_ALARM)
+                .putExtra(AlarmClock.EXTRA_HOUR, params.hour)
+                .putExtra(AlarmClock.EXTRA_MINUTES, params.minute)
+                .apply { params.message?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) } }
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            IntentTemplates.TIMER_SET -> Intent(AlarmClock.ACTION_SET_TIMER)
+                .putExtra(AlarmClock.EXTRA_LENGTH, params.lengthSeconds)
+                .apply { params.message?.let { putExtra(AlarmClock.EXTRA_MESSAGE, it) } }
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            IntentTemplates.ALARM_SHOW -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
+            IntentTemplates.TIMER_SHOW -> Intent(AlarmClock.ACTION_SHOW_TIMERS)
+            IntentTemplates.APP_INFO -> Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", params.packageName, null),
+            )
+            IntentTemplates.DIAL -> Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", params.number, null))
+            IntentTemplates.WEB_OPEN -> Intent(Intent.ACTION_VIEW, Uri.parse(params.url))
+            else -> {
+                // 用户自定义的那一条：action/组件/extras 都在设置里写死，这里只负责拼出来。
+                val custom = params.custom
+                if (custom != null) {
+                    buildUserTemplateIntent(custom)
+                } else {
+                    // settings.open 的自定义页面键：内置 8 个仍走 settingsAction，
+                    // 用户加的那些走这里。
+                    val page = IntentTemplateCatalog.page(params.page)
+                    if (page != null) buildUserPageIntent(page) else Intent(settingsAction(params.page))
+                }
+            }
+        }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    /**
+     * 一条用户自定义模板 → 隐式（或点名组件的）intent。
+     *
+     * extras 的类型只允许 String / Int / Bool 三种，且值在写入设置时就已经校验过形状；
+     * 这里按 kind 原样放回去，不做"猜一个类型"的兜底 —— 猜错会静默换掉一整个 extra。
+     */
+    private fun buildUserTemplateIntent(template: UserIntentTemplate): Intent {
+        val intent = Intent(template.action)
+        template.component?.let { applyComponent(intent, it) }
+        template.data?.let { intent.data = Uri.parse(it) }
+        template.categories.forEach { intent.addCategory(it) }
+        applyExtras(intent, template.extras)
+        return intent
+    }
+
+    /** 用户往 settings.open 里加的一个页面键 → action（+ 可选 extras）。 */
+    private fun buildUserPageIntent(page: UserSettingsPage): Intent {
+        val intent = Intent(page.action)
+        applyExtras(intent, page.extras)
+        return intent
+    }
+
+    /** `pkg/cls` 或 `pkg/.Cls`；形状在写入设置时已校验，这里只做拆分。 */
+    private fun applyComponent(intent: Intent, component: String) {
+        val slash = component.indexOf('/')
+        if (slash <= 0) return
+        val pkg = component.substring(0, slash)
+        val raw = component.substring(slash + 1)
+        // `.Cls` 这种相对写法按 Android 的约定补上包名：用户抄 dumpsys/日志里的组件名时常常是这种。
+        val cls = if (raw.startsWith(".")) pkg + raw else raw
+        runCatching { intent.setClassName(pkg, cls) }
+    }
+
+    private fun applyExtras(intent: Intent, extras: List<IntentExtra>) {
+        extras.forEach { extra ->
+            when (extra.kind) {
+                IntentExtra.KIND_INT -> extra.value.trim().toIntOrNull()?.let { intent.putExtra(extra.key, it) }
+                IntentExtra.KIND_BOOL -> intent.putExtra(extra.key, extra.value == "true")
+                else -> intent.putExtra(extra.key, extra.value)
+            }
+        }
+    }
+
+    /**
+     * 这一发 action 在这台机器上的候选接收方（去重，稳定排序）。
+     *
+     * 只在**点了名的包接不了**时调用，用来把"你能点谁"直接写进错误里。查询用
+     * `MATCH_DEFAULT_ONLY`：与真正派发那一步同一把尺子 —— 用更宽的尺子列出来的候选
+     * 会包含那些"连默认都没设、系统不会直接派给它"的条目，助手照着填还是失败。
+     */
+    private fun candidatesFor(intent: Intent): List<String> =
+        runCatching {
+            appContext.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                .map { it.activityInfo.packageName }
+                .distinct()
+                .sorted()
+        }.getOrDefault(emptyList())
 
     /** 悬浮窗授权是否在手：它是系统对后台启动 Activity 的公开豁免之一，与确认卡能否上屏同源。 */
     private fun overlayGranted(): Boolean =
@@ -394,6 +510,8 @@ class DirectBackend(
                 data = JSONObject().put(KEY_PACKAGE, packageName)
                     .put("verified", observed == appPackage)
                     .put("alreadyInFront", true)
+                    .put(DisplayTarget.KEY_DISPLAY, DEFAULT_DISPLAY)
+                    .put("landedOn", if (observed == appPackage) DEFAULT_DISPLAY else JSONObject.NULL)
                     .apply { if (observed != null) put("observed", observed) },
                 reason = "this app was already in the foreground; nothing was started" +
                     if (observed == appPackage) "" else " (no foreground observation: verified is false)",
@@ -420,10 +538,13 @@ class DirectBackend(
         }
         val observed = awaitForeground(packageName)
         val inCloneContainer = observed != null && observed in CLONE_CONTAINERS
-        val data = JSONObject().put(KEY_PACKAGE, packageName)
+        // 这一条通路只服务物理主屏（display 恒为 0）：可信屏那条走的是 Shizuku 的
+        // `am start --display`。两个后端回包的形状必须一样，助手才不必按落点分两套读法 ——
+        // 所以这里也报 `display` / `landedOn`，语义与那一侧逐字对齐（landedOn = 核验到的屏）。
+        val data = JSONObject().put(KEY_PACKAGE, packageName).put(DisplayTarget.KEY_DISPLAY, DEFAULT_DISPLAY)
         return when {
             // 核验通过：看到的正是请求要起的那个包。
-            observed == packageName -> ok(data.put("verified", true))
+            observed == packageName -> ok(data.put("verified", true).put("landedOn", DEFAULT_DISPLAY))
 
             // 确实看到另一个应用停在最前面：不声称成功。这一支与"还在冷启动"不是一回事 ——
             // 那种情况下 observed 为 null，走下面那条 verified:false 的分支。
@@ -442,7 +563,9 @@ class DirectBackend(
             else -> {
                 if (observed != null) data.put("observed", observed)
                 ok(
-                    data = data.put("verified", false),
+                    // 没核验到就不报落点：`landedOn: null` 与"落在 0 号屏"是两件事，
+                    // 可信屏那条通路对同一种状态报的也是 null（形状一致，助手才不必分两套读法）。
+                    data = data.put("verified", false).put("landedOn", JSONObject.NULL),
                     reason = when {
                     // 中介包停在最前面时，"认不出是哪个分身"只是次要信息，更要紧的是那可能
                     // 是一个等人选图标的系统选择框：它不进控件树、不报错，只有截帧看得见。
@@ -810,7 +933,95 @@ class DirectBackend(
         }
     }
 
-    private fun readMedia(kind: String, limit: Int): BackendResult {
+    /**
+     * [补丁] 文件名净化：去掉路径分隔符与控制字符，限长，空名给兜底。
+     *
+     * 原名来自 MediaStore，可能含 `/`、`:`、换行甚至 `..`；直接拼进目标目录就是
+     * 一次路径穿越。这里只做「白名单式收窄」：非法字符一律换 `_`，再裁掉首尾
+     * 的 `.`/空白，最长 60 字符。
+     */
+    private fun sanitizeExportName(name: String?, mime: String?, index: Int): String {
+        val cleaned = (name ?: "")
+            .map { ch ->
+                val bad = ch.code < 0x20 || ch == '/' || ch == '\\' || ch == ':' || ch == '*' ||
+                    ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|'
+                if (bad) '_' else ch
+            }
+            .joinToString("")
+            .trim('.', ' ', '_')
+            .take(60)
+        if (cleaned.isEmpty()) return "media-$index"
+        if (cleaned.contains('.')) return cleaned
+        // 无扩展名时按 MIME 补一个，便于容器内直接按类型识别。
+        val sub = mime?.substringAfter('/', "")?.substringBefore(';')?.lowercase().orEmpty()
+        return if (sub.isNotEmpty() && sub.length <= 5) "$cleaned.$sub" else cleaned
+    }
+
+    /**
+     * [补丁] 把一条 media 记录复制进沙盒 `inbox/`，并在 [item] 上追加导出字段。
+     *
+     * 失败只写 `exportError`，**不让整条 media.read 失败**：一条读不到的记录不该
+     * 把另外几张能用的图一起废掉。绝不覆盖已有文件（重名追加 `-2`、`-3`…）。
+     */
+    private fun exportMediaItem(
+        item: JSONObject,
+        uri: Uri,
+        index: Int,
+        name: String?,
+        mime: String?,
+        dateModified: Long,
+        sizeHint: Long,
+    ) {
+        if (sizeHint > EXPORT_MAX_BYTES) {
+            item.put("exportError", "too large: $sizeHint bytes")
+            Log.w(EXPORT_LOG_TAG, "导出跳过（声明尺寸超限 $sizeHint > $EXPORT_MAX_BYTES）: $uri")
+            return
+        }
+        val dir = File(appContext.filesDir, EXPORT_DIR_RELATIVE)
+        if (!dir.isDirectory && !dir.mkdirs()) {
+            item.put("exportError", "cannot create $EXPORT_DIR_RELATIVE")
+            Log.w(EXPORT_LOG_TAG, "导出失败：建不出目录 $dir")
+            return
+        }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val safe = sanitizeExportName(name, mime, index)
+        var dest = File(dir, "$stamp-$index-$safe")
+        var k = 2
+        while (dest.exists() && k <= 99) {
+            dest = File(dir, "$stamp-$index-$safe-$k")
+            k += 1
+        }
+        Log.i(EXPORT_LOG_TAG, "导出 $uri → $dest")
+        val failure = runCatching {
+            val stream = appContext.contentResolver.openInputStream(uri)
+                ?: error("openInputStream 返回 null")
+            stream.use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
+        }.exceptionOrNull()
+        if (failure != null) {
+            runCatching { dest.delete() }
+            item.put("exportError", failure.message ?: failure::class.java.simpleName)
+            Log.w(EXPORT_LOG_TAG, "导出失败 $uri: ${failure.message}", failure)
+            return
+        }
+        if (dest.length() > EXPORT_MAX_BYTES) {
+            val got = dest.length()
+            runCatching { dest.delete() }
+            item.put("exportError", "too large after copy: $got bytes")
+            Log.w(EXPORT_LOG_TAG, "导出回滚（实际 $got 字节超限）: $uri")
+            return
+        }
+        item.put("exportedPath", "$EXPORT_PATH_PREFIX/${dest.name}")
+        item.put("bytes", dest.length())
+        item.put("mime", mime ?: "")
+        item.put("dateModified", dateModified)
+        Log.i(EXPORT_LOG_TAG, "导出完成 ${dest.name}（${dest.length()} 字节）")
+    }
+
+    /**
+     * [补丁] `media.read`：默认按 [MediaStore.MediaColumns.DATE_MODIFIED] **倒序**
+     * （最新在前），`export=true` 时逐项复制进沙盒。
+     */
+    private fun readMedia(kind: String, limit: Int, export: Boolean = false): BackendResult {
         val collection = when (kind.lowercase()) {
             "video" -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             "image" -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -818,18 +1029,39 @@ class DirectBackend(
             // 一条看着合理其实是错的答案比一次失败更难查。
             else -> return BackendResult.Failed(RelayError.TRANSPORT_MALFORMED, "kind must be image/video")
         }
-        val projection = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATE_MODIFIED)
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.SIZE,
+        )
+        // [补丁] 时间倒序：调用方说「最新三张」时，拿到的必须真是最新的三张。
+        val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC, ${MediaStore.MediaColumns._ID} DESC"
+        if (export) Log.i(EXPORT_LOG_TAG, "media.read export kind=$kind limit=$limit")
         val items = JSONArray()
-        appContext.contentResolver.query(collection, projection, null, null, null)?.use { cursor ->
+        appContext.contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+            val mimeColumn = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+            val dateColumn = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+            val sizeColumn = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            var seq = 0
             while (cursor.moveToNext() && items.length() < limit) {
-                items.put(
-                    JSONObject().apply {
-                        put("uri", Uri.withAppendedPath(collection, cursor.getString(idColumn)).toString())
-                        put("name", cursor.getString(nameColumn))
-                    },
-                )
+                val uri = Uri.withAppendedPath(collection, cursor.getString(idColumn))
+                val name = cursor.getString(nameColumn)
+                val mime = if (mimeColumn >= 0) cursor.getString(mimeColumn) else null
+                val dateModified = if (dateColumn >= 0) cursor.getLong(dateColumn) else 0L
+                val sizeHint = if (sizeColumn >= 0) cursor.getLong(sizeColumn) else -1L
+                val item = JSONObject().apply {
+                    put("uri", uri.toString())
+                    put("name", name)
+                }
+                if (export) {
+                    seq += 1
+                    exportMediaItem(item, uri, seq, name, mime, dateModified, sizeHint)
+                }
+                items.put(item)
             }
         }
         return ok(JSONObject().put("count", items.length()).put("items", items))
@@ -907,7 +1139,7 @@ class DirectBackend(
          */
         internal val ARG_SPECS: Map<CapabilityId, ArgSpec> = mapOf(
             CapabilityId.PKG_QUERY to ArgSpec(allowed = setOf("keyword")),
-            CapabilityId.APP_LAUNCH to ArgSpec(setOf(KEY_PACKAGE), setOf(KEY_PACKAGE)),
+            CapabilityId.APP_LAUNCH to ArgSpec(setOf(KEY_PACKAGE, DisplayTarget.KEY_DISPLAY), setOf(KEY_PACKAGE)),
             // 模板名必填，其余键由 IntentTemplates 按模板各自判：形状把关在两处不重复，
             // 但"这条模板要哪几个参数"只有表自己知道，写在这里就会与表各跑一套。
             CapabilityId.SYS_INTENT to ArgSpec(
@@ -915,6 +1147,7 @@ class DirectBackend(
                     IntentTemplates.KEY_TEMPLATE, IntentTemplates.KEY_HOUR, IntentTemplates.KEY_MINUTE,
                     IntentTemplates.KEY_LENGTH, IntentTemplates.KEY_MESSAGE, IntentTemplates.KEY_PAGE,
                     IntentTemplates.KEY_PACKAGE, IntentTemplates.KEY_NUMBER, IntentTemplates.KEY_URL,
+                    IntentTemplates.KEY_HANDLER,
                 ),
                 setOf(IntentTemplates.KEY_TEMPLATE),
             ),
@@ -923,7 +1156,7 @@ class DirectBackend(
             CapabilityId.CALENDAR_READ to ArgSpec(setOf(KEY_LIMIT)),
             CapabilityId.CALENDAR_WRITE to ArgSpec(setOf(KEY_TITLE, KEY_START_MS, KEY_END_MS), setOf(KEY_TITLE)),
             CapabilityId.LOCATION_READ to ArgSpec(),
-            CapabilityId.MEDIA_READ to ArgSpec(setOf(KEY_KIND, KEY_LIMIT)),
+            CapabilityId.MEDIA_READ to ArgSpec(setOf(KEY_KIND, KEY_LIMIT, KEY_EXPORT)),
             CapabilityId.MEDIA_WRITE to ArgSpec(setOf(KEY_FILE, KEY_KIND), setOf(KEY_FILE)),
             CapabilityId.NOTIFY_POST to ArgSpec(setOf(KEY_TITLE, KEY_TEXT, KEY_ID), setOf(KEY_TITLE)),
             CapabilityId.NOTIFY_READ to ArgSpec(setOf(KEY_LIMIT, KEY_PACKAGE, KEY_INCLUDE_ONGOING)),
@@ -938,6 +1171,21 @@ class DirectBackend(
 
         const val KEY_PACKAGE = "package"
         const val KEY_FILE = "file"
+
+        /** 可选接收方键，与 `IntentTemplates.KEY_HANDLER` 同源（同一个字面量，不另抄）。 */
+        const val KEY_HANDLER = IntentTemplates.KEY_HANDLER
+
+        /**
+         * 系统选择器的包名。`resolveActivity(MATCH_DEFAULT_ONLY)` 在多个候选且没设默认时
+         * 回的就是它 —— 回包里出现这个名字等于"交给了选择器，没交给某个应用"。
+         */
+        const val RESOLVER_PACKAGE = "com.android.intentresolver"
+
+        /**
+         * 这一条通路只服务物理主屏，所以回包里的落点恒为 `DisplayTarget.DEFAULT_DISPLAY`。
+         * 它同时是"可选目标屏键的取值之一"，两处共用同一个常量，不另抄一个字面量。
+         */
+        val DEFAULT_DISPLAY = DisplayTarget.DEFAULT_DISPLAY
 
         /** 单个入站文件上限。信箱有 256 KiB 封顶，文件走中转区，必须另设一道。 */
         private const val MAX_UPLOAD_BYTES = 32L * 1024L * 1024L
@@ -961,6 +1209,33 @@ class DirectBackend(
         const val KEY_TITLE = "title"
         const val KEY_ID = "id"
         const val KEY_KIND = "kind"
+
+        /**
+         * [补丁] `media.read` 的「导出到沙盒」开关（1.4.1 增量）。
+         *
+         * 不传 = 与旧版**完全一致**（只回 uri+name），传 true 才复制字节。
+         */
+        const val KEY_EXPORT = "export"
+
+        /** [补丁] `media.read` 的 limit 上限：导出与列表都是「最新 N 张」的语义，20 足够。 */
+        const val MEDIA_LIMIT_MAX = 20
+
+        /** [补丁] 单个文件的导出上限，超限跳过并给 exportError，不让一次导出拖垮整个响应。 */
+        const val EXPORT_MAX_BYTES = 64L * 1024 * 1024
+
+        /**
+         * [补丁] 导出落点（相对 `filesDir`）：`files/user-data/inbox/`。
+         *
+         * `user-data` 经 PRoot `--bind=user-data:/root/projects` 就是 guest 的
+         * `/root/projects`，容器内即 `/root/projects/inbox/`。写操作只落在这个目录下。
+         */
+        const val EXPORT_DIR_RELATIVE = "user-data/inbox"
+
+        /** [补丁] 返回体里 exportedPath 的前缀（沙盒相对路径，如 `inbox/xxx.jpg`）。 */
+        const val EXPORT_PATH_PREFIX = "inbox"
+
+        /** [补丁] 导出相关日志统一标签，便于一条 grep 收全。 */
+        const val EXPORT_LOG_TAG = "DSHBoxPatch"
         const val KEY_NAME = "name"
         const val KEY_NUMBER = "number"
         const val KEY_START_MS = "startMs"

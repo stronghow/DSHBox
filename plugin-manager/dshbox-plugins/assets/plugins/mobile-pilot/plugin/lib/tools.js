@@ -204,6 +204,34 @@ function resultSchema (extra = {}) {
 
 const renderText = (_args, value) => [{ type: 'text', text: value.text }]
 
+/**
+ * 可选目标屏键（`display`）的参数声明。
+ *
+ * 收它的是 `ui.*` 里读树与坐标注入那几条，以及 `app.launch`（看把应用投到哪块屏）。语义：0 = 用户正在看的物理主屏，
+ * 另一个可填值是 `surface.virtual query` / 能力清单里 `backend.shizuku.trustedDisplay.displayId`
+ * 给出的可信虚拟屏编号；**不传就与从前完全一致**（落点由用户的执行模式偏好裁决）。
+ * 别的编号会被宿主以 E_TRANSPORT_MALFORMED 拒掉 —— 框架只有这两块屏知道怎么读写。
+ */
+function displayParam () {
+  return {
+    display: {
+      type: 'integer',
+      description: '可选，指定本次作用于哪块屏：0 = 用户正在看的物理主屏，或 surface.virtual 返回的可信虚拟屏 displayId。' +
+        '不传=与从前一致（由用户的执行模式偏好裁决）。虚拟屏与主屏分辨率不同，坐标不可跨屏复用；' +
+        '点名后回包的 surface 会说这次实际落在哪块屏（foreground / trusted-display），点名不算降级。'
+    }
+  }
+}
+
+/**
+ * 把可选的 `display` 从工具入参转发进能力参数：只有显式给了才带上。
+ * 「不传即与从前一致」建立在「键真的没出现」之上，所以这里不能用 `|| 0` 之类补默认值。
+ */
+function withDisplay (payload, args) {
+  if (args && args.display != null) payload.display = args.display
+  return payload
+}
+
 /** nodeId / selector 二选一的目标参数。 */
 function targetParams () {
   return {
@@ -212,7 +240,8 @@ function targetParams () {
       type: 'object',
       additionalProperties: true,
       description: '按字段匹配：text / desc / id / class / index / package（同时给出则需全部匹配；index 计兄弟节点）。与 nodeId 二选一。'
-    }
+    },
+    ...displayParam()
   }
 }
 
@@ -416,6 +445,11 @@ function manifestTime (manifest, file) {
       '应优先使用专用 phone_* 工具；仅当所需能力未被覆盖（contact.read、cal.read、loc.read、media.*、audio.capture、appops.set 等）时使用本工具。' +
       '危险与低频通路只在这里点名：sys.shell 是用户逐条开关的危险能力，坐标注入（ui.tap / ui.swipe / ui.text）也没有专用工具，' +
       '两者都要求调用方明确写出能力 id 与参数，不给一键包装。' +
+      'ui.* 那 15 条（读树与坐标注入）的 args 里可以带一个可选 display（0 = 用户正在看的物理主屏，' +
+      '或 surface.virtual 返回的可信虚拟屏 displayId）：不传就仍由用户的执行模式偏好裁决（与从前一致），' +
+      '传了这一次就落在点名的那个屏上 —— 虚拟屏上跑着游戏时用 {"display":0} 操作物理主屏上的系统界面。' +
+      'sys.intent 的六条只上屏模板（settings.open / alarm.show / timer.show / app.info / dial / web.open）' +
+      '不改任何状态，因此不受档位阻塞；alarm.set / timer.set 会真的建出闹钟/计时器，照旧按门禁询问。' +
       '返回 E_AWAITING_CONSENT 指的是 Pilot 审批在等答复 —— 这是本模块自己的许可，与 Android 系统弹框无关：' +
       '可在三处任一处答复，且同一时刻只呈现一处：助手页内的那张卡（该页在前台时）、悬浮卡、通知栏的「允许/拒绝」；' +
       '宿主界面位于最前面时悬浮卡不出现，请到通知栏或助手页答复，随后以完全相同的参数重试即可接上同一张框。' +
@@ -456,8 +490,10 @@ function manifestTime (manifest, file) {
       '① 每次操作前重新读取 —— nodeId 随界面变化失效；' +
       '② 虚拟屏与主屏（用户正在看的屏幕）的坐标系不同（例如虚拟屏 1080×1920、主屏 1260×2800），坐标不可跨显示面复用；' +
       '③ 控件树的文本内容可能与实际显示不一致，需要确认时以 phone_capture + read_image 为准；' +
-      '④ 快照里的 clickable 是框架原始位，能否点下去以 phone_node 的 actions 为准。',
-    parameters: {},
+      '④ 快照里的 clickable 是框架原始位，能否点下去以 phone_node 的 actions 为准。' +
+      '可选 display 指定读哪块屏：不传=按用户的执行模式偏好（与从前一致），传 0=用户正在看的物理主屏，' +
+      '传 surface.virtual 的 displayId=可信虚拟屏。虚拟屏上跑着游戏时用 display:0 读物理屏上的系统界面，正是这条参数的用途。',
+    parameters: displayParam(),
     output: {
       schema: resultSchema({
         nodes: { type: 'integer', required: true, description: '节点总数；读取失败时为 0。' },
@@ -465,8 +501,8 @@ function manifestTime (manifest, file) {
       }),
       render: renderText
     },
-    execute: async () => {
-      const r = await channel.call('ui.snapshot', {})
+    execute: async (args) => {
+      const r = await channel.call('ui.snapshot', withDisplay({}, args))
       if (!r.ok) return { ok: false, code: r.code || '', text: summary(r), path: '', nodes: 0, ...channelFields(r), artifactOk: true }
       const data = r.data || {}
       const file = dump(dir, 'snapshot', data)
@@ -502,7 +538,7 @@ function manifestTime (manifest, file) {
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const payload = args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }
+      const payload = withDisplay(args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }, args)
       const r = await channel.call(args.long === true ? 'ui.longClick' : 'ui.click', payload)
       return { ok: r.ok, code: r.code || '', text: summary(r), path: '', ...channelFields(r) }
     }
@@ -522,7 +558,7 @@ function manifestTime (manifest, file) {
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const payload = args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }
+      const payload = withDisplay(args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }, args)
       payload.text = args.text
       const r = await channel.call('ui.setValue', payload)
       return { ok: r.ok, code: r.code || '', text: summary(r), path: '', ...channelFields(r) }
@@ -549,7 +585,7 @@ function manifestTime (manifest, file) {
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const payload = args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }
+      const payload = withDisplay(args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }, args)
       payload.direction = args.direction
       if (args.times != null) payload.times = args.times
       if (args.until != null) payload.until = args.until
@@ -588,7 +624,7 @@ function manifestTime (manifest, file) {
       render: renderText
     },
     execute: async (args) => {
-      const payload = args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }
+      const payload = withDisplay(args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }, args)
       const r = await channel.call('ui.node', payload)
       if (!r.ok) return { ok: false, code: r.code || '', text: summary(r), path: '', actions: '', ...channelFields(r) }
       const n = (r.data && r.data.node) || {}
@@ -625,7 +661,7 @@ function manifestTime (manifest, file) {
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const payload = args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }
+      const payload = withDisplay(args.nodeId != null ? { nodeId: args.nodeId } : { selector: args.selector || {} }, args)
       for (const key of ['text', 'checked', 'absent', 'timeoutMs']) if (args[key] != null) payload[key] = args[key]
       const r = await channel.call('ui.waitFor', payload)
       return { ok: r.ok, code: r.code || '', text: summary(r), path: '', ...channelFields(r) }
@@ -639,11 +675,12 @@ function manifestTime (manifest, file) {
       '发送全局按键（ui.key）。前台屏只接受 back / home / recents，其他键返回 unknown key；' +
       'enter 只在虚拟屏上有意义（前台路径跑的是全局动作，其中没有 enter）。',
     parameters: {
-      key: { type: 'string', required: true, enum: ['back', 'home', 'recents', 'enter'], description: '按键名；enter 仅虚拟屏可用。' }
+      key: { type: 'string', required: true, enum: ['back', 'home', 'recents', 'enter'], description: '按键名；enter 仅虚拟屏可用。' },
+      ...displayParam()
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const r = await channel.call('ui.key', { key: args.key })
+      const r = await channel.call('ui.key', withDisplay({ key: args.key }, args))
       return { ok: r.ok, code: r.code || '', text: summary(r), path: '', ...channelFields(r) }
     }
   })
@@ -653,15 +690,19 @@ function manifestTime (manifest, file) {
     name: 'phone_launch',
     description:
       '按包名启动应用（app.launch）。返回 verified / landedOn：verified=false 表示命令已发出但未确认落地，不应视为成功。' +
+      '可选 display 点名投送到哪块屏：不传=按用户的执行模式偏好（与从前一致），0=用户正在看的物理主屏，' +
+      '或 surface.virtual 返回的可信虚拟屏 displayId —— 想"在虚拟屏上跑游戏、同时把某个应用起在主屏"就点名，' +
+      '否则偏好是后台时会起在虚拟屏上。' +
       '向虚拟屏投送应用时，仅当 landedOn 等于 surface.virtual 返回的 displayId 才算落地；grabbedUserScreen=true 才说明它落到了主屏（用户正在看的屏幕）上，值得告知用户。' +
       'landedOn=0 且没有该标记只表示用户本来就在这个应用上，说明不了这次启动去了哪里；' +
       'topOnTarget / targetDisplayMoved 用于分辨"换了个包名落地"与"真的没起来"，读完这两项再判定失败。',
     parameters: {
-      package: { type: 'string', required: true, description: '包名（可由 phone_call pkg.query 获取）。' }
+      package: { type: 'string', required: true, description: '包名（可由 phone_call pkg.query 获取）。' },
+      ...displayParam()
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
-      const r = await channel.call('app.launch', { package: args.package })
+      const r = await channel.call('app.launch', withDisplay({ package: args.package }, args))
       return { ok: r.ok, code: r.code || '', text: summary(r), path: '', ...channelFields(r) }
     }
   })
@@ -678,13 +719,39 @@ function manifestTime (manifest, file) {
       '可在三处任一处答复，且同一时刻只呈现一处：助手页内的那张卡（该页在前台时）、悬浮卡、通知栏的「允许/拒绝」；' +
       '宿主界面位于最前面时悬浮卡不出现，请到通知栏或助手页答复，随后以完全相同的参数重试即可接上同一张框。',
     parameters: {
-      out: { type: 'string', description: `落盘路径，默认写入本包落盘目录（${dir}）。` }
+      out: { type: 'string', description: `落盘路径，默认写入本包落盘目录（${dir}）。` },
+      maxEdge: {
+        type: 'integer',
+        description:
+          '可选，缩到「最长边」不超过这么多像素（例如 960）。与 scale 二选一，同时给时 maxEdge 优先。' +
+          '不给就是不缩放（与从前一致）。缩放后回包带 maxEdge=实际最长边。'
+      },
+      scale: {
+        type: 'number',
+        description: '可选，按比例缩放，0<scale<=1（例如 0.5）。只在可信虚拟屏那条通路上生效。'
+      },
+      format: {
+        type: 'string',
+        enum: ['png', 'jpeg'],
+        description:
+          '可选，产物容器格式，缺省 png。jpeg 编码比 png 快很多、体积小一个量级；' +
+          '落盘文件后缀随之变成 .jpg。不给就与从前完全一致（整屏无损 PNG）。'
+      },
+      quality: {
+        type: 'integer',
+        description: '可选，JPEG 质量 1..100，缺省 60（由宿主钳制）。format=jpeg 时才有意义。'
+      }
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
       const ownName = !args.out
       const file = args.out || path.join(shotDir, `${SHOT_PREFIX}${stamp()}${SHOT_SUFFIX}`)
-      const r = await channel.call('screen.capture', {}, { out: file })
+      // 成像参数只在给了的时候才递：一个都不给时递空对象，走的就是原来那条整屏无损 PNG。
+      const imaging = {}
+      for (const key of ['maxEdge', 'scale', 'format', 'quality']) {
+        if (args[key] != null) imaging[key] = args[key]
+      }
+      const r = await channel.call('screen.capture', imaging, { out: file })
       // 默认名落在自己的落盘目录里，与快照同一套保留策略：调用方只认回包里那份 path，
       // 旧帧留着没有读者，却会把目录撑满。调用方指定落点时本次没有自己的产物，不清。
       if (ownName) pruneSnapshots(shotDir, SHOT_PREFIX, SHOT_SUFFIX)
@@ -719,9 +786,15 @@ function manifestTime (manifest, file) {
       'alarm.show、timer.show、settings.open(page: wifi|bluetooth|display|location|sound|apn|developer|nfc)、' +
       'app.info(package)、dial(number，只打开拨号盘不拨出)、web.open(url，只收 http/https)。' +
       '后六条只是把系统页面摆到用户眼前，不替他改任何东西；表里没有删除或取消闹钟的入口，也不给加。' +
+      '这六条也因此不受档位阻塞：无论助手的档位是「每次询问」还是别的，它们都不会被挂起等审批；' +
+      'alarm.set / timer.set 会真的建出闹钟/计时器，仍按门禁询问。' +
       'SKIP_UI 只对 alarm.set/timer.set 有意义，其余一定上屏。' +
-      '返回值只表示"已交给哪个应用"：本机实测 SET_ALARM 有多个候选时会先弹系统选择器，' +
-      'resolvedPackage 可能是 com.android.intentresolver；要确认闹钟真设上，得请用户在时钟里看一眼，' +
+      '可选 handler（包名）点名这一发由哪个应用接：八条模板发的都是隐式 intent，本机没设默认应用、' +
+      '又有多个候选时系统会先弹一个选择器顶到最前面，把用户打断一次，回包的 resolvedPackage 还会变成' +
+      'com.android.intentresolver（那只是"交给了选择器"）。点了 handler 就直达那一个应用，回包另给 pinned:true。' +
+      'handler 填错（那个包接不了这一发的 action）回 E_TRANSPORT_MALFORMED，错误里直接列出这台机器上的候选包名；' +
+      '回包里出现 viaResolver:true 就等于"这一发还是走了选择器"。' +
+      '返回值只表示"已交给哪个应用"：要确认闹钟真设上，得请用户在时钟里看一眼，' +
       '或在用户开启危险能力后走 phone_call sys.shell {"verb":"dumpsys","args":["alarm"]}。',
     parameters: {
       template: {
@@ -740,12 +813,19 @@ function manifestTime (manifest, file) {
       },
       package: { type: 'string', description: 'app.info 的目标包名（可由 phone_call pkg.query 取得）。' },
       number: { type: 'string', description: 'dial 的号码，只含数字与 + * # ( ) . , 空格 连字符，≤32 字。' },
-      url: { type: 'string', description: 'web.open 的网址，必须 http:// 或 https:// 开头，不含空白。' }
+      url: { type: 'string', description: 'web.open 的网址，必须 http:// 或 https:// 开头，不含空白。' },
+      handler: {
+        type: 'string',
+        description:
+          '可选，这一发由哪个应用接（包名）。点了就不走系统选择器、直达那个应用；' +
+          '填的包接不了这条模板的 action 时回 E_TRANSPORT_MALFORMED，错误里会列出候选包名。' +
+          '与 package 不是一回事：package 是 app.info 要展示哪个应用，handler 是谁来接收这一发。'
+      }
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
       const payload = { template: args.template }
-      for (const key of ['hour', 'minute', 'length', 'message', 'page', 'package', 'number', 'url']) {
+      for (const key of ['hour', 'minute', 'length', 'message', 'page', 'package', 'number', 'url', 'handler']) {
         if (args[key] != null) payload[key] = args[key]
       }
       const r = await channel.call('sys.intent', payload)
@@ -767,12 +847,28 @@ function manifestTime (manifest, file) {
       action: { type: 'string', required: true, enum: ['create', 'query', 'release'], description: '动作。' },
       width: { type: 'integer', description: '可选，320..2560（由宿主钳制）。' },
       height: { type: 'integer', description: '可选，320..2560。' },
-      dpi: { type: 'integer', description: '可选，显示密度。' }
+      dpi: { type: 'integer', description: '可选，显示密度。' },
+      focusable: {
+        type: 'boolean',
+        description:
+          '可选，缺省 true（与从前一致）。给 false 时这块屏不会去抢主屏的顶层焦点、也不影响主屏的输入法跟随目标 —— ' +
+          '主屏上正常打字不再被打断，而 ui.tap / ui.swipe 的注入事件不依赖焦点，照常点得中。' +
+          '只改焦点归属，不动 public 位，所以 ui.snapshot 读这块屏的控件树不受影响。' +
+          '建屏时生效：屏已在跑且建法不同时会收掉重建（displayId 会变）；不传这一项则一律沿用现状。'
+      },
+      extraFlags: {
+        type: 'integer',
+        description:
+          '进阶：直接往建屏 FLAGS 上按位或的追加位（只增不减；要退回原样就 release 再 create）。' +
+          '不传即与从前一致。'
+      }
     },
     output: { schema: resultSchema(), render: renderText },
     execute: async (args) => {
       const payload = { action: args.action }
-      for (const key of ['width', 'height', 'dpi']) if (args[key] != null) payload[key] = args[key]
+      for (const key of ['width', 'height', 'dpi', 'focusable', 'extraFlags']) {
+        if (args[key] != null) payload[key] = args[key]
+      }
       const r = await channel.call('surface.virtual', payload)
       const text = r.ok ? `虚拟屏 ${payload.action}: ${compact(r.data)}` : summary(r)
       return { ok: r.ok, code: r.code || '', text, path: '', ...channelFields(r) }

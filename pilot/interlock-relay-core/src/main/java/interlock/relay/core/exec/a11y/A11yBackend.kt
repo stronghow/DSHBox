@@ -407,9 +407,13 @@ class A11yBackend(
         "no window tree to read on display $displayId after a second read: no window holds focus there - retry once one does",
     )
 
-    /** `ui.tap` 的点击形状：`{"x","y"}`，不接受任何其它键（手势键在键表那一层就被拒）。 */
+    /**
+     * `ui.tap` 的点击形状：`{"x","y"}`，可选 `{"display"}`。
+     * 手势键在键表那一层就被拒；`display` 是本后端**照单收下的路由残留**——
+     * 它已经在裁决层换成了执行面（见 `DisplayTarget`），到这里只是不能再把它当成多余键。
+     */
     private suspend fun click(service: RelayAccessibilityService, args: JSONObject): BackendResult {
-        badArgShape(args, POINT_KEYS, POINT_KEYS)?.let { return malformed(it) }
+        badArgShape(args, POINT_KEYS, POINT_KEYS + KEY_DISPLAY)?.let { return malformed(it) }
         val screen = displayBounds()
         badCoordinate(args, mapOf(KEY_X to screen.width(), KEY_Y to screen.height()))
             ?.let { return malformed(it) }
@@ -423,11 +427,11 @@ class A11yBackend(
     }
 
     /**
-     * 滑动形状：`{"fromX","fromY","toX","toY"}`，可选 `{"durationMs"}`。
+     * 滑动形状：`{"fromX","fromY","toX","toY"}`，可选 `{"durationMs","display"}`。
      * 只有 `ui.swipe` 走这里；`ui.tap` 在键表那一层就拒掉手势键，不再共用这份解析。
      */
     internal suspend fun swipe(service: RelayAccessibilityService, args: JSONObject): BackendResult {
-        badArgShape(args, STROKE_KEYS, SWIPE_KEYS)?.let { return malformed(it) }
+        badArgShape(args, STROKE_KEYS, SWIPE_KEYS + KEY_DISPLAY)?.let { return malformed(it) }
         val screen = displayBounds()
         badCoordinate(
             args,
@@ -711,11 +715,21 @@ class A11yBackend(
         const val KEY_TO_Y = "toY"
         const val KEY_DURATION_MS = "durationMs"
 
+        /**
+         * 可选目标屏键。本后端**不解释它**：它在裁决层就被换算成了执行面
+         * （见 `DisplayTarget`），到这里只剩"不能把它当多余键拒掉"这一件事。
+         * 键名与 `DisplayTarget.KEY_DISPLAY` 是同一个字面量，两处必须一起改。
+         */
+        const val KEY_DISPLAY = "display"
+
         /** 点击形状的键：既是必填项，也不允许再多出任何键。 */
         val POINT_KEYS = setOf(KEY_X, KEY_Y)
 
         /** 节点级目标的两种顶层形状。 */
         val TARGET_KEYS = setOf(NodeSelector.KEY_SELECTOR, NodeSelector.KEY_NODE_ID, NodeActions.KEY_RELATIVE)
+
+        /** 节点级能力的顶层键：目标两形状 + 可选目标屏键。 */
+        val TREE_KEYS = TARGET_KEYS + KEY_DISPLAY
 
         /**
          * 坐标通路：只认默认屏，落后台屏时由 Shizuku 后端执行。
@@ -801,34 +815,37 @@ class A11yBackend(
          * 声明放在上面那些键组之后：伴生对象按书写顺序初始化，表在前面就取不到键组。
          */
         internal val ARG_SPECS: Map<CapabilityId, ArgSpec> = mapOf(
-            CapabilityId.UI_SNAPSHOT to ArgSpec(),
+            // `display` 是后加的可选键：落点已由裁决层换算成执行面（见 DisplayTarget），
+            // 本后端只负责不把它当多余键拒掉。不传时行为与从前逐字节相同。
+            CapabilityId.UI_SNAPSHOT to ArgSpec(setOf(KEY_DISPLAY)),
             CapabilityId.SCREEN_CAPTURE to ArgSpec(),
 
-            CapabilityId.UI_TAP to ArgSpec(POINT_KEYS, POINT_KEYS),
-            CapabilityId.UI_SWIPE to ArgSpec(SWIPE_KEYS, STROKE_KEYS),
-            CapabilityId.UI_TEXT to ArgSpec(setOf(KEY_TEXT), setOf(KEY_TEXT)),
-            // 节点级：目标两形状（selector / nodeId）由 NodeSelector 自己判，这里只放行顶层键。
-            CapabilityId.UI_CLICK to ArgSpec(TARGET_KEYS),
-            CapabilityId.UI_LONG_CLICK to ArgSpec(TARGET_KEYS),
-            CapabilityId.UI_SELECT to ArgSpec(TARGET_KEYS),
-            CapabilityId.UI_DISMISS to ArgSpec(TARGET_KEYS),
-            CapabilityId.UI_NODE to ArgSpec(TARGET_KEYS),
-            CapabilityId.UI_IME_ACTION to ArgSpec(TARGET_KEYS),
+            CapabilityId.UI_TAP to ArgSpec(POINT_KEYS + KEY_DISPLAY, POINT_KEYS),
+            CapabilityId.UI_SWIPE to ArgSpec(SWIPE_KEYS + KEY_DISPLAY, STROKE_KEYS),
+            CapabilityId.UI_TEXT to ArgSpec(setOf(KEY_TEXT, KEY_DISPLAY), setOf(KEY_TEXT)),
+            // 节点级：目标两形状（selector / nodeId）由 NodeSelector 自己判，这里只放行顶层键
+            // 与那个可选的目标屏键。
+            CapabilityId.UI_CLICK to ArgSpec(TREE_KEYS),
+            CapabilityId.UI_LONG_CLICK to ArgSpec(TREE_KEYS),
+            CapabilityId.UI_SELECT to ArgSpec(TREE_KEYS),
+            CapabilityId.UI_DISMISS to ArgSpec(TREE_KEYS),
+            CapabilityId.UI_NODE to ArgSpec(TREE_KEYS),
+            CapabilityId.UI_IME_ACTION to ArgSpec(TREE_KEYS),
 
             // `direction` 进了必填集，与手册上的星号对齐：只放 allowed 时省略它要走到
             // NodeActions 才被发现，回的是「must be forward or backward」——
             // 少一个键被说成一个键值写错，助手会去换拼写而不是补上那个键。
             CapabilityId.UI_SCROLL to ArgSpec(
-                TARGET_KEYS + NodeActions.KEY_DIRECTION + NodeActions.KEY_TIMES + NodeActions.KEY_UNTIL,
+                TREE_KEYS + NodeActions.KEY_DIRECTION + NodeActions.KEY_TIMES + NodeActions.KEY_UNTIL,
                 setOf(NodeActions.KEY_DIRECTION),
             ),
-            CapabilityId.UI_SET_VALUE to ArgSpec(TARGET_KEYS + NodeActions.KEY_TEXT, setOf(NodeActions.KEY_TEXT)),
-            CapabilityId.UI_SET_PROGRESS to ArgSpec(TARGET_KEYS + NodeActions.KEY_PERCENT + NodeActions.KEY_VALUE),
+            CapabilityId.UI_SET_VALUE to ArgSpec(TREE_KEYS + NodeActions.KEY_TEXT, setOf(NodeActions.KEY_TEXT)),
+            CapabilityId.UI_SET_PROGRESS to ArgSpec(TREE_KEYS + NodeActions.KEY_PERCENT + NodeActions.KEY_VALUE),
             CapabilityId.UI_WAIT_FOR to ArgSpec(
-                TARGET_KEYS + NodeActions.KEY_TEXT + NodeActions.KEY_CHECKED +
+                TREE_KEYS + NodeActions.KEY_TEXT + NodeActions.KEY_CHECKED +
                     NodeActions.KEY_ABSENT + NodeActions.KEY_TIMEOUT_MS,
             ),
-            CapabilityId.UI_KEY to ArgSpec(setOf(KEY_KEY), setOf(KEY_KEY)),
+            CapabilityId.UI_KEY to ArgSpec(setOf(KEY_KEY, KEY_DISPLAY), setOf(KEY_KEY)),
         )
     }
 }

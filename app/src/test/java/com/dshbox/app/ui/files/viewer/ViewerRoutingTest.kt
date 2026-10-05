@@ -48,6 +48,11 @@ class ViewerRoutingTest {
         assertEquals(ViewerMode.INFO, auto(FileTypeClassifier.FileKind.ARCHIVE, "rar", "rar"))
         assertEquals(ViewerMode.INFO, auto(FileTypeClassifier.FileKind.ARCHIVE, "gz", "gzip"))
         assertEquals(ViewerMode.INFO, auto(FileTypeClassifier.FileKind.ARCHIVE, "zst", "zstd"))
+        // [补丁] 安装包不做内建预览：APK 虽命中 ZIP 魔数、.idsig 属签名旁路文件，
+        // 都改送信息卡（那里有「安装 / 用其他应用打开 / 复制路径」出口）。
+        assertEquals(ViewerMode.INFO, auto(FileTypeClassifier.FileKind.ARCHIVE, "apk", "apk"))
+        assertEquals(ViewerMode.INFO, auto(FileTypeClassifier.FileKind.HEX, "idsig", "idsig"))
+        assertEquals(ViewerMode.ARCHIVE, auto(FileTypeClassifier.FileKind.ARCHIVE, "jar", "jar"))
     }
 
     @Test

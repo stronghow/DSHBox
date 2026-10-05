@@ -15,8 +15,9 @@ import android.view.accessibility.AccessibilityWindowInfo
  * 快照与按编号回读**必须共用同一棵树**：`nodeId` 是前序下标，换一块屏就从 0 重数，
  * 两处各取各的会把一次点击打到另一颗节点上 —— 那是"看起来成功"的错误，比报错难发现。
  *
- * 落点屏由执行面决定，不由参数决定：助手递不进 `displayId`（`ArgErrors` 那条拒绝话术说的
- * 就是这件事），用户选的「优先后台」才决定这一趟落在哪块屏上。
+ * 落点屏默认由执行面决定：用户选的「优先后台」决定这一趟落在哪块屏上。调用方也可以点名——
+ * `ui.*` 的可选 `display` 在裁决层被换算成执行面（见 `DisplayTarget`），到了这里仍然只是
+ * "这一次的执行面是哪块屏"这一件事，两条来路共用同一个判断（读树的那棵树与执行面同源）。
  */
 internal class DisplayTree(
     val displayId: Int,

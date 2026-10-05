@@ -26,8 +26,8 @@ import androidx.compose.ui.unit.sp
 import com.dshbox.app.R
 
 /**
- * 兜底信息卡：文件元信息 + 六个出口——外部打开 / 外部编辑 / 分享 /
- * 导出 / 按文本打开 / 按 Hex 打开。作为不可内建渲染类型（PDF/压缩包/Office/音视频）
+ * 兜底信息卡：文件元信息 + 出口——安装 / 外部打开 / 外部编辑 / 分享 /
+ * 导出 / 按文本打开 / 按 Hex 打开 / 复制路径（[补丁] 后两者为本轮新增）。作为不可内建渲染类型（PDF/压缩包/Office/音视频）
  * 的主视图，也可作为其他类型的信息卡弹层复用。
  *
  * 风险确认由外壳在回调前完成；本组件纯展示。
@@ -47,9 +47,29 @@ internal fun FallbackPanel(
     onExport: (() -> Unit)?,
     onOpenAsText: (() -> Unit)?,
     onOpenAsHex: (() -> Unit)?,
+    /** [补丁] 该类型没有内建预览时，在卡片最上方明确写「无法预览」，不留白。 */
+    previewUnavailable: Boolean = false,
+    /** [补丁] 「安装」（仅安装包类文件提供；null 则不出现该出口）。 */
+    onInstall: (() -> Unit)? = null,
+    /** [补丁] 「复制路径」。 */
+    onCopyPath: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth().padding(16.dp)) {
+        if (previewUnavailable) {
+            Text(
+                text = stringResource(R.string.files_preview_unavailable),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                text = stringResource(R.string.files_preview_unavailable_hint),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, bottom = 10.dp),
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -75,12 +95,14 @@ internal fun FallbackPanel(
         }
         Spacer(Modifier.height(12.dp))
         val exits = buildList {
+            onInstall?.let { add(stringResource(R.string.files_exit_install) to it) }
             onExternalOpen?.let { add(stringResource(R.string.files_exit_external_open) to it) }
             onExternalEdit?.let { add(stringResource(R.string.files_exit_external_edit) to it) }
             onShare?.let { add(stringResource(R.string.files_exit_share) to it) }
             onExport?.let { add(stringResource(R.string.files_exit_export) to it) }
             onOpenAsText?.let { add(stringResource(R.string.files_exit_open_as_text) to it) }
             onOpenAsHex?.let { add(stringResource(R.string.files_exit_open_as_hex) to it) }
+            onCopyPath?.let { add(stringResource(R.string.files_exit_copy_path) to it) }
         }
         // 两列出口按钮
         for (i in exits.indices step 2) {

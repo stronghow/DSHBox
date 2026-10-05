@@ -268,6 +268,16 @@ class ShizukuBackend(
         private set
 
     /**
+     * 本端最近一次**明确要求过**的「这块屏要不要抢焦点」。
+     *
+     * 只有调用方在 `surface.virtual create` 里写了 `focusable` 才会有值：不写时本端看不出
+     * 那块屏实际是按哪一组 FLAGS 建的（`Display` 上读不出这两个位），宁可让回包里没有这个
+     * 字段，也不报一个自己没核对过的值。收屏与解绑一并清掉，否则下一块屏会继承上一块的结论。
+     */
+    @Volatile
+    private var displayFocusable: Boolean? = null
+
+    /**
      * 那块虚拟屏此刻在不在，问显示服务而不是问这里的缓存。
      *
      * 建屏时记下编号之后，系统可以因为空闲超时或用户撤销而把这块屏收走；只认 `displayId >= 0`
@@ -814,18 +824,35 @@ class ShizukuBackend(
         val args = call.args
         val action = args.optString(KEY_ACTION).ifBlank { ACTION_CREATE }
         if (action == ACTION_CREATE) {
+            // 本轮两个新开关的三态：-1 表示调用方压根没提这一项。没提与「提了 true」是两件事
+            // —— 前者要沿用这块屏现有的建法（也就与放开这两个键之前完全一致），后者才是要求。
+            val focusable = when {
+                !args.has(KEY_FOCUSABLE) -> FLAG_UNSPECIFIED
+                args.optBoolean(KEY_FOCUSABLE, true) -> FOCUSABLE_ON
+                else -> FOCUSABLE_OFF
+            }
+            val extraFlags = if (args.has(KEY_EXTRA_FLAGS)) args.optInt(KEY_EXTRA_FLAGS, 0) else FLAG_UNSPECIFIED
+            val reshaping = focusable != FLAG_UNSPECIFIED || extraFlags != FLAG_UNSPECIFIED
             // 本地缓存说过期就过期：那块屏归服务端进程持有，它可能被系统回收、也可能被
             // 上一次 release 收掉，而宿主这边只会一直留着旧编号。先对一次账再决定复用，
             // 否则「create 返回 kept」指的是一块已经不存在的屏。预算装不下这次对账时
             // 缓存维持原样——「屏在不在」随后由本地 DisplayManager 说了算，不受影响。
             if (displayAlive()) refreshDisplay(budget)
-            if (displayAlive()) return BackendResult.Ok(data = displayData("kept"))
+            // 没提那两个开关时，本地看得见这块屏就直接答 kept：与放开它们之前一字不差，
+            // 也不多付一次远端往返。提了就不能只听本地的 —— 这块屏当年是按哪一组 FLAGS 建的
+            // 只有服务端记得，本端从 `Display` 上看不出差别，答 kept 会让「要它别抢焦点」
+            // 这句话悄悄落空（而调用方以为已经生效了）。
+            if (displayAlive() && !reshaping) return BackendResult.Ok(data = displayData("kept"))
             val waitMs = budget.remoteWaitMs(DISPLAY_TXN_WAIT_MS, REMOTE_MARGIN_MS)
                 ?: return remoteBudgetExhausted(budget, REMOTE_MARGIN_MS)
             val created = when (val txn = displayTransaction(budget.cap, ShellProtocol.CODE_DISPLAY_CREATE, waitMs) {
                 it.writeInt(args.optInt(KEY_WIDTH, DEFAULT_WIDTH))
                 it.writeInt(args.optInt(KEY_HEIGHT, DEFAULT_HEIGHT))
                 it.writeInt(args.optInt(KEY_DPI, DEFAULT_DPI))
+                // 后两个 int 是后加的，服务端在本包内一起换；旧服务端读到多余的两个 int
+                // 只是把它们留在 Parcel 里丢掉，不会读错前三个。
+                it.writeInt(focusable)
+                it.writeInt(extraFlags)
             }) {
                 is RemoteTxn.Done -> txn.value
                 is RemoteTxn.GaveUp -> return BackendResult.Failed(
@@ -846,12 +873,17 @@ class ShizukuBackend(
                 return BackendResult.Failed(RelayError.SURFACE_TRUSTED_DENIED, created.reason)
             }
             displayId = created.code
+            // 明确要求过才记：没提这一项时本端并不知道那块屏实际是哪一组 FLAGS，不编。
+            if (focusable != FLAG_UNSPECIFIED) displayFocusable = focusable == FOCUSABLE_ON
             // 新建即作废缓存：那块屏可能拿回同一个编号却是完全不同的内容，而这份缓存是
             // 按 displayId 认账的 —— 编号复用这一种情况只能靠"建新屏就清掉"来兜。
             frameCache?.clear()
             // 尺寸以服务端为准：请求里的宽高会被夹到允许区间，回原值等于报一个不存在的屏。
             refreshDisplay(budget)
-            return BackendResult.Ok(data = displayData(ACTION_CREATE))
+            // 服务端「照旧复用」那条回的是非空原因（"display already exists"），真建起来那条
+            // 回空串：state 照它分，别把一次复用报成一次新建。
+            val state = if (created.reason.isEmpty()) ACTION_CREATE else "kept"
+            return BackendResult.Ok(data = displayData(state))
         }
         if (action == ACTION_RELEASE) {
             val waitMs = budget.remoteWaitMs(DISPLAY_TXN_WAIT_MS, REMOTE_MARGIN_MS)
@@ -967,9 +999,9 @@ class ShizukuBackend(
         // 停在最前面的是**中介包**时，处置方向与"没落地"相反：那是一个等用户挑图标的系统选择框，
         // 重建虚拟屏收不掉它。这一支单独回，并把唯一看得见它的办法（截帧）写进原因里。
         if (LaunchMediators.isMediator(topNow) || LaunchMediators.isMediator(seen[DEFAULT_DISPLAY])) {
-            // 「让用户自己选」与「带屏号去点」都不是万能下一步：落点屏由用户的执行模式偏好决定，
-            // ui.tap 不接受 display 那一类参数；选择框停在虚拟屏上时，用户那块屏看不见它。
-            // 所以给的是真能走的那条：先把界面带回主屏（切执行模式或收掉这面虚拟屏），再截帧答掉。
+            // 「让用户自己选」不是万能下一步，但现在多了一条真能走的路：`ui.*` 收一个显式的
+            // `display`（见 DisplayTarget），选择框停在哪块屏上就读/点哪块屏 —— 停在虚拟屏时
+            // 用户那块屏看不见它，从前只能把界面带回主屏。两条路都写进原因里，谁先试由调用方定。
             return BackendResult.Failed(
                 RelayError.LAUNCH_NOT_LANDED,
                 "accepted but a system chooser may hold the front (top on display $display is $topNow, " +
@@ -978,8 +1010,10 @@ class ShizukuBackend(
                     "read ui.snapshot first and fall back to screen.capture: the two icons often carry " +
                     "neither text nor contentDescription, and only pixels tell the original from the " +
                     "clone. " +
-                    "ui.tap takes no display argument: which screen a call runs on is the user's " +
-                    "execution-mode choice, so bring the interface back to the main screen first " +
+                    "Name the screen you mean: ui.snapshot / ui.tap / ui.swipe take an optional " +
+                    "\"display\" (0 = the screen the user is looking at, or backend.shizuku." +
+                    "trustedDisplay.displayId for this virtual one), so read that screen's tree and " +
+                    "answer the box there. Otherwise bring the interface back to the main screen first " +
                     "(switch the execution mode, or send surface.virtual {\"action\":\"release\"}), " +
                     "then capture, answer the box, and send this same launch again. Re-creating the " +
                     "virtual display dismisses nothing.",
@@ -1161,30 +1195,47 @@ class ShizukuBackend(
      */
     private suspend fun displayCapture(call: BackendCall, budget: CallBudget): BackendResult {
         val display = requireDisplay() ?: return noDisplay()
+        val args = call.args
+        // 成像参数：一个都不给就是原来那条路 —— 整屏、无损 PNG。格式名先规范化，
+        // 大小写与空白由本端收掉（助手写 "JPEG" 不该报错）。
+        val format = args.optString(KEY_FORMAT).trim().lowercase()
+        if (format.isNotEmpty() && format != FORMAT_PNG && format != FORMAT_JPEG) {
+            return malformed("format must be \"png\" or \"jpeg\", got \"$format\"")
+        }
+        val jpeg = format == FORMAT_JPEG
+        val jpegQuality = if (jpeg) {
+            args.optInt(KEY_QUALITY, DEFAULT_JPEG_QUALITY).coerceIn(MIN_JPEG_QUALITY, MAX_JPEG_QUALITY)
+        } else {
+            LOSSLESS
+        }
+        val maxWidth = captureMaxWidth(args)
         // 取帧要落成产物文件，收尾按带产物那档预留；预算装不下就不取帧——
         // 回「帧可能稍后才到手」比悄悄递一张旧帧诚实。
         val waitMs = budget.remoteWaitMs(CAPTURE_WAIT_MS, REMOTE_MARGIN_ARTIFACT_MS)
             ?: return remoteBudgetExhausted(budget, REMOTE_MARGIN_ARTIFACT_MS)
         val frames = frameCacheFor(call)
-        val fresh = when (val txn = captureBytes(budget.cap, LOSSLESS, LOSSLESS, waitMs)) {
+        val fresh = when (val txn = captureBytes(budget.cap, jpegQuality, maxWidth, waitMs)) {
             is RemoteTxn.Done -> txn.value
             is RemoteTxn.GaveUp -> return BackendResult.Failed(
                 RelayError.TRANSPORT_TIMEOUT,
                 remoteGiveUpReason("display capture", txn.waitedMs, txn.submittedBeforeExpiryMs),
             )
         }
+        // 「上一帧」是按成像参数存的：压缩格式与缩放尺寸都不同的一帧，替不了这一次要的那一帧
+        // —— 文件名后缀与画面尺寸都会对不上（见 LastFrameCache.peek 的同一段说明）。
+        val signature = captureSignature(jpegQuality, maxWidth)
         val bytes: ByteArray
         val ageMs: Long
         if (fresh != null) {
             // 内容与上一帧逐字节相同时不刷新时刻：那块屏在重绘同一张画面，对调用方来说
             // 与"没出新帧"是同一件事 —— 报告要的 `stale` / `frameAgeMs` 说的都是"这里没变过"。
-            val cached = frames.peek(display)
+            val cached = frames.peek(display, signature)
             val unchanged = cached != null && cached.first.contentEquals(fresh)
             bytes = fresh
             ageMs = if (unchanged) cached!!.second else 0L
-            if (!unchanged) frames.remember(display, fresh)
+            if (!unchanged) frames.remember(display, fresh, signature)
         } else {
-            val cached = frames.peek(display)
+            val cached = frames.peek(display, signature)
                 ?: return BackendResult.Failed(
                     RelayError.BACKEND_UNAVAILABLE,
                     "no frame from the trusted display: retry, or re-create it with surface.virtual",
@@ -1192,17 +1243,66 @@ class ShizukuBackend(
             bytes = cached.first
             ageMs = cached.second
         }
-        val staged = reaper.newArtifactFile(call.requestId, ARTIFACT_SUFFIX, CAPTURE_ESTIMATE_BYTES)
+        val suffix = if (jpeg) CAPTURE_SUFFIX_JPEG else ARTIFACT_SUFFIX
+        val staged = reaper.newArtifactFile(call.requestId, suffix, CAPTURE_ESTIMATE_BYTES)
             ?: return BackendResult.Failed(RelayError.STORAGE_FULL, "quota exhausted")
         val written = runCatching { staged.writeBytes(bytes) }.isSuccess && staged.length() > 0L
         if (!written) {
             reaper.discard(staged)
             return BackendResult.Failed(RelayError.INTERNAL, "frame copy failed")
         }
-        val data = JSONObject().put("display", display).put("bytes", staged.length()).put("stale", ageMs > 0L)
+        val data = JSONObject()
+            .put("display", display)
+            .put("bytes", staged.length())
+            .put("stale", ageMs > 0L)
+            // 实际编成的容器格式与质量、缩放后的最长边，都照实回：这一帧到底是多少像素的
+            // 什么格式，得让助手从回包里读得出来，而不是只能再解一次产物文件去猜。
+            .put("format", if (jpeg) FORMAT_JPEG else FORMAT_PNG)
+        if (jpeg) data.put("quality", jpegQuality)
+        captureEdge(maxWidth)?.let { data.put("maxEdge", it) }
         if (ageMs > 0L) data.put("frameAgeMs", ageMs)
         return publishArtifact(staged, call, data)
     }
+
+    /**
+     * 把助手给的 `maxEdge` / `scale` 换算成服务端唯一认的那个数：先缩到多宽。
+     *
+     * 服务端那条缩放是按**宽度**等比的（`createScaledBitmap(maxWidth, maxWidth*H/W)`），
+     * 所以「最长边」在横屏上恰好等于 maxWidth，在竖屏上却比它大：直接把 maxEdge 当宽度
+     * 递下去，竖屏（本机真屏是 1440x3200 这种）缩出来的最长边会明显超出助手要的那条线。
+     * 这里按本端已知的屏尺寸换成宽度，让两个方向收敛到同一个语义 —— 缩放后最长边 = 那条线。
+     *
+     * 屏尺寸未知（与服务端那次对账没成功过）时一个都不缩：宁可不缩，也不按猜出来的比例缩。
+     * 目标不小于屏本身时也不缩，回 0 —— 放大不是这条能力该做的事。
+     */
+    private fun captureMaxWidth(args: JSONObject): Int {
+        val (w, h) = displaySize
+        if (w <= 0 || h <= 0) return 0
+        val longest = maxOf(w, h)
+        val scale = args.optDouble(KEY_SCALE, Double.NaN)
+        val target = when {
+            args.has(KEY_MAX_EDGE) -> args.optInt(KEY_MAX_EDGE, 0)
+            !scale.isNaN() -> (longest * scale).toInt()
+            else -> return 0
+        }.coerceAtLeast(MIN_ENCODE_PX).coerceAtMost(longest)
+        if (target >= longest) return 0
+        return (target.toLong() * w / longest).toInt().coerceAtLeast(1)
+    }
+
+    /** 缩放后那帧的最长边；没缩（[maxWidth] 为 0）或屏尺寸未知时回 null，不编一个数出来。 */
+    private fun captureEdge(maxWidth: Int): Int? {
+        if (maxWidth <= 0) return null
+        val (w, h) = displaySize
+        if (w <= 0 || h <= 0) return null
+        return if (w >= h) maxWidth else (maxWidth.toLong() * h / w).toInt()
+    }
+
+    /**
+     * 上一帧的缓存签名：压缩质量与缩放宽度各占一段，两者任一不同就不是同一"种"帧。
+     * `maxWidth` 被服务端夹在 2560 以内、质量在 100 以内，所以 16 位一段够用且不会撞。
+     */
+    private fun captureSignature(jpegQuality: Int, maxWidth: Int): Int =
+        (jpegQuality shl 16) or (maxWidth and 0xffff)
 
     /**
      * 上一帧的缓存。路径取自调用自己带的 [RelayPaths]：宿主私有目录（宿主目录名 + "-state"），
@@ -1221,6 +1321,9 @@ class ShizukuBackend(
     fun clearFrameCache() {
         frameCache?.clear()
         frameCache = null
+        // 屏没了，本端对那块屏的建法也就没有可报的了。收屏（release）与解绑都走这里，
+        // 于是下一块屏不会继承上一块屏的 `focusable` 结论。
+        displayFocusable = null
     }
 
     private fun frameCacheFor(call: BackendCall): LastFrameCache =
@@ -1423,7 +1526,7 @@ class ShizukuBackend(
 
     private fun displayData(state: String): JSONObject {
         val size = displaySize
-        return JSONObject()
+        val data = JSONObject()
             .put("state", state)
             // 同一个编号给两个名字是有意为之：`display` 是这条能力一直以来的字段，而能力清单与
             // 我们自己的报错文案（ArgErrors 那句"去读 backend.shizuku.trustedDisplay"）教
@@ -1432,6 +1535,9 @@ class ShizukuBackend(
             .put("displayId", displayId)
             .put("width", size.first)
             .put("height", size.second)
+        // 只在确实要求过时才有这一项：见 [displayFocusable]。
+        displayFocusable?.let { data.put("focusable", it) }
+        return data
     }
 
     /** 与服务端对一次账（生命周期探测路径，无调用预算可扣）：见 [refreshDisplay]。 */
@@ -1606,21 +1712,41 @@ class ShizukuBackend(
             // 建屏的 action 可省，省下来就是 create：`surface.virtual {}` 要能直接回屏号。
             // 把 action 做成必填会让无参调用吃一条 E_TRANSPORT_MALFORMED，
             // 而它没有任何写错的键名可改。
-            CapabilityId.SURFACE_VIRTUAL to ArgSpec(setOf(KEY_ACTION, KEY_WIDTH, KEY_HEIGHT, KEY_DPI), emptySet()),
+            //
+            // focusable / extraFlags 是后加的两个**可选**键：不传时服务端用的还是原来那一组
+            // FLAGS，一个位都不差，所以不把它们写进 required。
+            CapabilityId.SURFACE_VIRTUAL to ArgSpec(
+                setOf(KEY_ACTION, KEY_WIDTH, KEY_HEIGHT, KEY_DPI, KEY_FOCUSABLE, KEY_EXTRA_FLAGS),
+                emptySet(),
+            ),
 
-            CapabilityId.APP_LAUNCH to ArgSpec(setOf(KEY_PACKAGE), setOf(KEY_PACKAGE)),
-            CapabilityId.UI_TEXT to ArgSpec(setOf(KEY_TEXT), setOf(KEY_TEXT)),
-            CapabilityId.UI_KEY to ArgSpec(setOf(KEY_KEY_EVENT), setOf(KEY_KEY_EVENT)),
-            CapabilityId.SCREEN_CAPTURE to ArgSpec(),
+            // `display` 是后加的可选键，与 `ui.*` 那几条同一个来路：调用方点名把应用投到哪块屏，
+            // 裁决层已经把它换成了执行面（`display: <可信屏编号>` → BACKEND_TRUSTED，也就是
+            // 本后端；`display: 0` 会走 DirectBackend，根本不到这里）。本后端只负责不把它
+            // 当多余键拒掉 —— 真正落在哪块屏由这里的 `requireDisplay()` 说了算，回包的
+            // `display` / `landedOn` 也照实写那一个数。不传时行为与从前逐字节相同。
+            CapabilityId.APP_LAUNCH to ArgSpec(
+                setOf(KEY_PACKAGE, KEY_DISPLAY),
+                setOf(KEY_PACKAGE),
+            ),
+            // `display` 是后加的可选键：落点已由裁决层换算成执行面（见 DisplayTarget），
+            // 本后端只负责不把它当多余键拒掉。不传时行为与从前逐字节相同。
+            CapabilityId.UI_TEXT to ArgSpec(setOf(KEY_TEXT, KEY_DISPLAY), setOf(KEY_TEXT)),
+            CapabilityId.UI_KEY to ArgSpec(setOf(KEY_KEY_EVENT, KEY_DISPLAY), setOf(KEY_KEY_EVENT)),
+            // 从只收一个空表放开成四个可选键：空表意味着「一个键都不许有」，
+            // 而 maxEdge / scale / format / quality 都要从这条口子进来。键全可选，
+            // 不传时 displayCapture 走的就是原来那条无损整屏 PNG 的路（逐字节同一条代码路径）。
+            CapabilityId.SCREEN_CAPTURE to
+                ArgSpec(setOf(KEY_MAX_EDGE, KEY_SCALE, KEY_FORMAT, KEY_QUALITY)),
             // 与 direct 通路那条 `screen.record` 共用同一组键：同一能力两条通路给两种形状，
             // 助手就要为落点各写一份脚本。
             CapabilityId.SCREEN_RECORD to ArgSpec(setOf(KEY_SECONDS)),
 
             // 点击与滑动是两条能力、两组键：混用一律以 unknown key 被拒，
             // 而不是像从前那样把滑动键静默丢掉、跑成一次点击。
-            CapabilityId.UI_TAP to ArgSpec(setOf(KEY_X, KEY_Y)),
+            CapabilityId.UI_TAP to ArgSpec(setOf(KEY_X, KEY_Y, KEY_DISPLAY)),
             CapabilityId.UI_SWIPE to
-                ArgSpec(setOf(KEY_FROM_X, KEY_FROM_Y, KEY_TO_X, KEY_TO_Y, KEY_DURATION_MS)),
+                ArgSpec(setOf(KEY_FROM_X, KEY_FROM_Y, KEY_TO_X, KEY_TO_Y, KEY_DURATION_MS, KEY_DISPLAY)),
         )
 
         private val PACKAGE_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_.]{0,127}$")
@@ -1751,6 +1877,15 @@ class ShizukuBackend(
         private const val KEY_WIDTH = "width"
         private const val KEY_HEIGHT = "height"
         private const val KEY_DPI = "dpi"
+        // 这块后台屏要不要跟真屏抢焦点（建屏时生效，见 TrustedDisplay.create）。
+        private const val KEY_FOCUSABLE = "focusable"
+        // 进阶口子：直接往建屏 FLAGS 上按位或的追加位（只增不减），取值见 TrustedDisplay。
+        private const val KEY_EXTRA_FLAGS = "extraFlags"
+        // 成像四键（见 displayCapture）：最长边、缩放比、容器格式、JPEG 质量。
+        private const val KEY_MAX_EDGE = "maxEdge"
+        private const val KEY_SCALE = "scale"
+        private const val KEY_FORMAT = "format"
+        private const val KEY_QUALITY = "quality"
         private const val KEY_TEXT = "text"
         private const val KEY_KEY_EVENT = "key"
         private const val KEY_X = "x"
@@ -1760,6 +1895,13 @@ class ShizukuBackend(
         private const val KEY_TO_X = "toX"
         private const val KEY_TO_Y = "toY"
         private const val KEY_DURATION_MS = "durationMs"
+
+        /**
+         * 可选目标屏键。本后端**不解释它**：落点已在裁决层换算成执行面
+         * （见 `DisplayTarget`），这里的 `displayTap` 等本来就只对 `requireDisplay()`
+         * 那块屏发 `input -d`，所以这一格只是"不能把它当多余键拒掉"。
+         */
+        private const val KEY_DISPLAY = "display"
 
         private const val ACTION_CREATE = "create"
         private const val ACTION_RELEASE = "release"
@@ -1781,6 +1923,34 @@ class ShizukuBackend(
         private const val ARTIFACT_SUFFIX = "png"
         /** 可信屏静置时再给一次的那一帧，落在宿主私有目录里。 */
         private const val LAST_FRAME_FILE = "last-frame.png"
+
+        /**
+         * `screen.capture` 的成像参数。
+         *
+         * 默认档必须与放开这四个键之前**逐字节一致**：无格式名 → PNG、质量取 [LOSSLESS]（0，
+         * 服务端据此走无损编码）、不缩放。所以缺省时下面这些常量一个都不参与那条路径。
+         */
+        private const val FORMAT_PNG = "png"
+        private const val FORMAT_JPEG = "jpeg"
+
+        /** JPEG 的默认质量：60 是录屏那条一直在用的值，同样大小的画面压到 PNG 的十分之一量级。 */
+        private const val DEFAULT_JPEG_QUALITY = 60
+        private const val MIN_JPEG_QUALITY = 1
+        private const val MAX_JPEG_QUALITY = 100
+
+        /** JPEG 产物的后缀。配额表认 `jpg`（见 StorageReaper.ALLOWED_EXTENSIONS）。 */
+        private const val CAPTURE_SUFFIX_JPEG = "jpg"
+
+        /**
+         * `surface.virtual` 的 `focusable` 三态与 `extraFlags` 的「没提」哨兵。
+         *
+         * 取值与协议字面量共用 [ShellProtocol] 那一组；服务端按它们决定是沿用现状、要求可聚焦、
+         * 还是要求不抢焦点 —— 位本身定义在 `TrustedDisplay`（建屏那一侧），本端只递意图，
+         * 不自己拼 FLAGS。
+         */
+        private const val FLAG_UNSPECIFIED = ShellProtocol.DISPLAY_ARG_UNSPECIFIED
+        private const val FOCUSABLE_ON = ShellProtocol.DISPLAY_FOCUSABLE_ON
+        private const val FOCUSABLE_OFF = ShellProtocol.DISPLAY_FOCUSABLE_OFF
 
         /** 后台录屏的一组参数。目标帧率是上限，实际给到多少由回包里的 actualFps 说。 */
         private const val KEY_SECONDS = "seconds"

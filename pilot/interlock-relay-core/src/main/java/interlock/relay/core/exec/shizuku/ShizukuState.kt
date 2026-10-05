@@ -243,4 +243,20 @@ object ShellProtocol {
      * 服务侧不实现它，Shizuku 就杀不掉那个进程 —— 宿主每重启一次就多留下一个用户服务进程。
      */
     const val CODE_DESTROY = 16777115
+
+    // ── `CODE_DISPLAY_CREATE` 里后两个 int 的三态取值 ──
+    //
+    // 两侧共用同一组字面量：宿主把「没提这一项」原样写进 Parcel，服务端按它决定是沿用
+    // 这块屏现有的建法（也就与放开 `focusable`/`extraFlags` 之前完全一致），还是按要求改建。
+    // `focusable` 用 ON/OFF；`extraFlags` 只有「没提」与「按位或这些位」两种，没有「清零」——
+    // 那些位只增不减，要退回原样就 release 再 create。
+
+    /** 调用方没提这一项：沿用现状。 */
+    const val DISPLAY_ARG_UNSPECIFIED = -1
+
+    /** `focusable` 要求这块屏可聚焦（缺省行为）。 */
+    const val DISPLAY_FOCUSABLE_ON = 1
+
+    /** `focusable` 要求这块屏不跟真屏抢焦点。 */
+    const val DISPLAY_FOCUSABLE_OFF = 0
 }

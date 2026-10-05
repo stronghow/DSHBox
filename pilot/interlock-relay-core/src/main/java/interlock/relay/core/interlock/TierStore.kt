@@ -25,12 +25,27 @@ class TierStore(private val prefs: RelayPrefs) {
     /**
      * 用户没拨过时的档位。
      *
-     * `sys.shell` 是唯一一条默认「禁止」的：它一次覆盖的就是一批 shell 身份的动词，
-     * 与其他那条「逐次弹框」的把关不在同一档。要开必须由用户自己在界面上拨一下，
-     * 不随默认值走进来 —— 表内的只读动词也要等这一步之后才谈得上可用。
+     * [补丁] 下面这一组默认档位直接给 ALWAYS：三条截屏 + `sys.shell` + 8 条"实用"能力
+     * （secure settings 写、剪贴板读写、app 停止、包安装、appops、媒体写、通知读取）。
+     * 注意：光改这里不够——"每次必问"还有一层来自上限（见 InterlockGate.requiresApproval），
+     * 那些能力的上限已在 CapabilityRegistry 里一并改成 ANY；两处缺一不可。
      */
-    private fun defaultTier(id: CapabilityId): AccessTier =
-        if (id == CapabilityId.SYS_SHELL) AccessTier.DENIED else DEFAULT_TIER
+    private fun defaultTier(id: CapabilityId): AccessTier = when (id) {
+        CapabilityId.SYS_SHELL,
+        CapabilityId.SECURE_SETTINGS,
+        CapabilityId.CLIPBOARD_READ,
+        CapabilityId.CLIPBOARD_WRITE,
+        CapabilityId.APP_STOP,
+        CapabilityId.PKG_INSTALL,
+        CapabilityId.APPOPS_SET,
+        CapabilityId.MEDIA_WRITE,
+        CapabilityId.NOTIFY_READ,
+        CapabilityId.SCREEN_CAPTURE,
+        CapabilityId.SCREEN_OBSERVE,
+        CapabilityId.SCREEN_RECORD,
+        -> AccessTier.ALWAYS
+        else -> DEFAULT_TIER
+    }
 
     /**
      * 档位按用户选定的原样存储。不可逆能力的「每次必问」由裁决层按上限强制

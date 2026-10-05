@@ -42,7 +42,7 @@ object InterlockTargets {
                 // 只写模板名就等于让用户批一个看不懂的词；而按默认分支去格式化时间，
                 // 打开设置页那几条会被印成 `-01:-01`。
                 val template = args.optString("template")
-                template.takeIf { it.isNotEmpty() }?.take(MAX_DETAIL_CHARS) to when (template) {
+                val detail = when (template) {
                     "alarm.set" -> "%02d:%02d".format(args.optInt("hour", -1), args.optInt("minute", -1))
                     "timer.set" -> "length=${args.opt("length")}s"
                     "settings.open" -> args.optString("page")
@@ -50,7 +50,15 @@ object InterlockTargets {
                     "dial" -> args.optString("number")
                     "web.open" -> args.optString("url")
                     else -> ""
-                }.take(MAX_DETAIL_CHARS)
+                }
+                // 点了接收方（`handler`，见 IntentTemplates.KEY_HANDLER）就写在卡上：用户批的是
+                // "把这件交给那一个应用"，而这一行正是他与回包 `resolvedPackage` 对账的地方。
+                // 没点就不写，卡面与从前一字不差。
+                val handler = args.optString(HANDLER_KEY).takeIf { it.isNotEmpty() }
+                template.takeIf { it.isNotEmpty() }?.take(MAX_DETAIL_CHARS) to
+                    listOfNotNull(detail.ifEmpty { null }, handler?.let { "-> $it" })
+                        .joinToString(" ")
+                        .take(MAX_DETAIL_CHARS)
             }
 
             CapabilityId.SECURE_SETTINGS -> {
@@ -225,6 +233,13 @@ object InterlockTargets {
     )
 
     private const val MAX_DETAIL_CHARS = 80
+
+    /**
+     * `sys.intent` 的可选接收方键。字面量与 `IntentTemplates.KEY_HANDLER` 同源；
+     * 本文件里其余模板名/key 也一律写成字面量（不把 exec 层拉进 interlock 层），
+     * 两处必须一起改。
+     */
+    private const val HANDLER_KEY = "handler"
 
     /** 单个条件值的上限：够看清"点的是哪一个"，又不至于让一行吞掉整条目标。 */
     private const val MAX_VALUE_CHARS = 24

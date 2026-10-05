@@ -1,5 +1,6 @@
 package com.dshbox.app.ui.files.viewer
 
+import android.content.Context
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -203,6 +204,25 @@ internal fun FileViewerScreen(
     fun launchExternalOpenInternal(file: File, mime: String) {
         scope.launch {
             val ok = withContext(Dispatchers.IO) { ExternalOpener.openView(context, file, mime) }
+            if (!ok) toastRes(R.string.files_exit_no_app)
+        }
+    }
+
+    /** [补丁] 「复制路径」：把物理路径写进剪贴板，便于用户自己拿路径去别处用。 */
+    fun copyPathToClipboard(path: String) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        if (cm == null) {
+            toastRes(R.string.files_exit_copy_path_failed)
+            return
+        }
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("path", path))
+        toastRes(R.string.files_exit_copy_path_done)
+    }
+
+    /** [补丁] 「安装」：只发 ACTION_VIEW + APK MIME 给系统安装器，不卸载不清数据。 */
+    fun installPackage(file: File) {
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { ExternalOpener.openInstall(context, file) }
             if (!ok) toastRes(R.string.files_exit_no_app)
         }
     }
@@ -524,6 +544,12 @@ internal fun FileViewerScreen(
                         onExport = { showInfo = false; exportFile(r.file) },
                         onOpenAsText = if (!isTextKind) ({ showInfo = false; viewMode = ViewerMode.TEXT }) else null,
                         onOpenAsHex = if (bodyMode != ViewerMode.HEX) ({ showInfo = false; viewMode = ViewerMode.HEX }) else null,
+                        onInstall = if (isInstallPackage(r.type.extension, r.type.subType)) {
+                            ({ showInfo = false; installPackage(r.file) })
+                        } else {
+                            null
+                        },
+                        onCopyPath = { showInfo = false; copyPathToClipboard(r.physicalPath) },
                     )
                 }
             },
@@ -684,6 +710,12 @@ internal fun FileViewerScreen(
                     onExport = f.file?.let { file -> ({ exportFile(file) }) },
                     onOpenAsText = null,
                     onOpenAsHex = null,
+                    // [补丁] 打不开的文件不再只有"重试/导出"：给安装（安装包）与复制路径
+                    previewUnavailable = f.file != null,
+                    onInstall = f.file
+                        ?.takeIf { isInstallPackage(FileTypeClassifier.extensionOf(it.name), null) }
+                        ?.let { file -> ({ installPackage(file) }) },
+                    onCopyPath = f.file?.let { ({ copyPathToClipboard(f.physicalPath) }) },
                 )
                 Text(
                     text = f.message?.asString() ?: stringResource(R.string.files_viewer_read_failed),
@@ -711,6 +743,7 @@ internal fun FileViewerScreen(
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                     )
                 }
+                val installPackageFile = isInstallPackage(r.type.extension, r.type.subType)
                 FallbackPanel(
                     name = r.file.name,
                     logicalPath = logicalPath,
@@ -725,6 +758,11 @@ internal fun FileViewerScreen(
                     onExport = { exportFile(r.file) },
                     onOpenAsText = if (officeExtractFailed) null else ({ viewMode = ViewerMode.TEXT }),
                     onOpenAsHex = { viewMode = ViewerMode.HEX },
+                    // [补丁] 本卡就是"没有内建预览"的落点：明确写出「无法预览」，
+                    // 并给 安装（仅安装包）/ 用其他应用打开(外部打开) / 复制路径 三条出口。
+                    previewUnavailable = !officeExtractFailed,
+                    onInstall = if (installPackageFile) ({ installPackage(r.file) }) else null,
+                    onCopyPath = { copyPathToClipboard(r.physicalPath) },
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()

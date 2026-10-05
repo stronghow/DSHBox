@@ -25,6 +25,38 @@ object ConsentSurfaces {
     private const val UID_SYSTEM = 1000
 
     /**
+     * 授权界面判据的运行时配置。
+     *
+     * 默认值全部等于下面那几张内置名单，因此"用户没拨过"与"本功能加入之前"是同一条路径。
+     * 这些项在设置里位于**危险**分组：关掉总开关等于放弃"AI 不能替你点掉别的 App 的
+     * 系统授权框"这条边界，界面会给出最重的提示并要求长按确认，改动写审计日志。
+     */
+    data class Config(
+        val enabled: Boolean = true,
+        /** 额外点名要按授权界面对待的包（只会更严格）。 */
+        val extraPackages: Set<String> = emptySet(),
+        /** 厂商权限管理器包名前缀；null = 用内置名单。 */
+        val packagePrefixes: List<String>? = null,
+        /** 授权按钮的 viewId 特征词；null = 用内置名单。 */
+        val viewIdKeywords: List<String>? = null,
+        /** `relative` 参数是否一律按"可能碰授权框"对待。 */
+        val relativeIsConsent: Boolean = true,
+    )
+
+    @Volatile
+    var config: () -> Config = { Config() }
+
+    private val BUILTIN_VIEW_IDS = listOf(
+        "permission_allow", "permission_deny", "permission_button", "button_allow",
+    )
+
+    private fun viewIdMatches(viewId: String?, cfg: Config): Boolean {
+        val id = viewId?.lowercase() ?: return false
+        val keywords = cfg.viewIdKeywords ?: BUILTIN_VIEW_IDS
+        return keywords.any { id.contains(it) }
+    }
+
+    /**
      * 包名 → uid 的解析器，由装配根接上 `PackageManager`。
      *
      * 做成注入点有两个理由：这条 object 不带 Context，JVM 侧也要能在不碰框架的情况下
@@ -79,8 +111,12 @@ object ConsentSurfaces {
     fun isConsentPackage(packageName: String?): Boolean {
         val pkg = packageName?.lowercase()?.trim() ?: return false
         if (pkg.isEmpty()) return false
+        val cfg = config()
+        if (!cfg.enabled) return false
+        if (pkg in cfg.extraPackages) return true
         if (isSystemOwned(pkg) || pkg in CONSENT_PACKAGES) return true
-        return CONSENT_PACKAGE_PREFIXES.any { pkg.startsWith(it) }
+        val prefixes = cfg.packagePrefixes ?: CONSENT_PACKAGE_PREFIXES
+        return prefixes.any { pkg.startsWith(it) }
     }
 
     /**
@@ -93,13 +129,16 @@ object ConsentSurfaces {
      * 判据必须只挑不会认错的那两种。
      */
     fun looksLikeConsentControl(packageName: String?, viewId: String?): Boolean {
+        val cfg = config()
+        if (!cfg.enabled) return false
         val pkg = packageName?.lowercase()?.trim().orEmpty()
-        if (pkg.isNotEmpty() && (pkg in CONSENT_PACKAGES || CONSENT_PACKAGE_PREFIXES.any { pkg.startsWith(it) })) {
-            return true
+        if (pkg.isNotEmpty()) {
+            val prefixes = cfg.packagePrefixes ?: CONSENT_PACKAGE_PREFIXES
+            if (pkg in CONSENT_PACKAGES || pkg in cfg.extraPackages || prefixes.any { pkg.startsWith(it) }) {
+                return true
+            }
         }
-        val id = viewId?.lowercase() ?: return false
-        return id.contains("permission_allow") || id.contains("permission_deny") ||
-            id.contains("permission_button") || id.contains("button_allow")
+        return viewIdMatches(viewId, cfg)
     }
 
     /**
@@ -109,11 +148,12 @@ object ConsentSurfaces {
      * 一个 `nodeId`），所以还有 [looksLikeConsentNode] 那道按解析结果判的兜底。
      */
     fun looksLikeConsentFromArgs(args: JSONObject): Boolean {
+        val cfg = config()
         // 带 `relative` 时参数里那颗节点只是**参照物**，真正要按的那一颗要到执行时才定出来。
         // 归属判据看不见它，就只能按本文件最严的那一条走：每次问人、不给会话授权。
         // 少了这一问，「标题作锚点 + 下方第 N 颗」就能把系统授权框上的「允许」绕成
         // 一次普通点击 —— 那条兜底 viewId 判据防的正是这种 ROM 代管的弹窗。
-        if (args.has("relative")) return true
+        if (args.has("relative")) return cfg.enabled && cfg.relativeIsConsent
         val selector = args.optJSONObject(NodeSelector.KEY_SELECTOR) ?: args
         val pkg = selector.optString(NodeSelector.KEY_PACKAGE).takeIf { it.isNotEmpty() } ?: return false
         return isConsentPackage(pkg)
@@ -127,8 +167,8 @@ object ConsentSurfaces {
      */
     fun looksLikeConsentNode(packageName: String?, viewId: String?): Boolean {
         if (isConsentPackage(packageName)) return true
-        val id = viewId?.lowercase() ?: return false
-        return id.contains("permission_allow") || id.contains("permission_deny") ||
-            id.contains("permission_button") || id.contains("button_allow")
+        val cfg = config()
+        if (!cfg.enabled) return false
+        return viewIdMatches(viewId, cfg)
     }
 }

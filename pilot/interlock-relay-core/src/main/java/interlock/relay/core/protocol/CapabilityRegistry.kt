@@ -91,7 +91,7 @@ object CapabilityRegistry {
             CapabilityId.SCREEN_CAPTURE,
             listOf(BackendId.A11Y, BackendId.DIRECT, BackendId.SHIZUKU),
             setOf(SurfaceKind.FOREGROUND, SurfaceKind.BACKEND_TRUSTED, SurfaceKind.OBSERVE_ONLY),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.SESSION_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
             // 能力级下限是模块下限 29：MediaProjection 前台路线在本机 Android 10 上就能跑
             // （每次会话要系统确认框）。无障碍那条免确认路线另有自己的下限
             // （SCREENSHOT_MIN_SDK = 30），由路线探测引用，不是这里的口径——
@@ -102,7 +102,7 @@ object CapabilityRegistry {
         cap(
             CapabilityId.SCREEN_OBSERVE, listOf(BackendId.DIRECT),
             setOf(SurfaceKind.OBSERVE_ONLY),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.SESSION_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
             minSdk = 21,
         ),
         cap(
@@ -110,12 +110,12 @@ object CapabilityRegistry {
             // 系统框根本不出现，所以两条通路分属两个后端。
             CapabilityId.SCREEN_RECORD, listOf(BackendId.DIRECT, BackendId.SHIZUKU),
             setOf(SurfaceKind.OBSERVE_ONLY, SurfaceKind.FOREGROUND, SurfaceKind.BACKEND_TRUSTED),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.SESSION_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
             minSdk = 21,
         ),
         cap(
             CapabilityId.NOTIFY_READ, listOf(BackendId.DIRECT), emptySet(),
-            GuideClass.LIST_ONLY, SettingsTarget.NOTIFICATION_LISTENER, TierCeiling.SESSION_ONLY,
+            GuideClass.LIST_ONLY, SettingsTarget.NOTIFICATION_LISTENER, TierCeiling.ANY,
             minSdk = 22,
         ),
 
@@ -210,14 +210,16 @@ object CapabilityRegistry {
             CapabilityId.SYS_INTENT, listOf(BackendId.DIRECT), setOf(SurfaceKind.FOREGROUND),
             GuideClass.NOT_REQUIRED, SettingsTarget.NONE, TierCeiling.ANY,
         ),
-        // 上限 ASK_ONLY：这条一次覆盖的就是一批 shell 身份动词，免确认等于把闸门整段让开。
+        // [补丁] 上限由 ASK_ONLY 改为 ANY：sys.shell 也要免确认。
+        // 这一条是 InterlockGate.requiresApproval 里比 SESSION_ONLY 更靠前的短路，
+        // 不放开它，会话授权也照样每次弹框。
         cap(
             CapabilityId.SYS_SHELL, listOf(BackendId.SHIZUKU), emptySet(),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.APP_STOP, listOf(BackendId.SHIZUKU), emptySet(),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.SURFACE_VIRTUAL, listOf(BackendId.SHIZUKU),
@@ -230,12 +232,12 @@ object CapabilityRegistry {
         cap(
             CapabilityId.CLIPBOARD_READ, listOf(BackendId.DIRECT),
             setOf(SurfaceKind.FOREGROUND),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.CLIPBOARD_WRITE, listOf(BackendId.DIRECT),
             setOf(SurfaceKind.FOREGROUND),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.CONTACT_READ, listOf(BackendId.DIRECT), emptySet(),
@@ -278,7 +280,7 @@ object CapabilityRegistry {
             CapabilityId.MEDIA_WRITE, listOf(BackendId.DIRECT), emptySet(),
             // 写自己的新条目在 API 29 起零权限：既没有需要用户去的设置页，
             // 也不该给一个"所有文件访问"的引导位（那要 MANAGE_EXTERNAL_STORAGE，本模块不申请）。
-            GuideClass.NOT_REQUIRED, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NOT_REQUIRED, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.AUDIO_CAPTURE, listOf(BackendId.DIRECT), emptySet(),
@@ -293,16 +295,16 @@ object CapabilityRegistry {
         ),
         cap(
             CapabilityId.PKG_INSTALL, listOf(BackendId.SHIZUKU), emptySet(),
-            GuideClass.DEEP_LINK_OK, SettingsTarget.UNKNOWN_SOURCES, TierCeiling.ASK_ONLY,
+            GuideClass.DEEP_LINK_OK, SettingsTarget.UNKNOWN_SOURCES, TierCeiling.ANY,
             perms = listOf(Manifest.permission.REQUEST_INSTALL_PACKAGES),
         ),
         cap(
             CapabilityId.SECURE_SETTINGS, listOf(BackendId.SHIZUKU), emptySet(),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.APPOPS_SET, listOf(BackendId.SHIZUKU), emptySet(),
-            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ASK_ONLY,
+            GuideClass.NO_SETTINGS_PAGE, SettingsTarget.NONE, TierCeiling.ANY,
         ),
         cap(
             CapabilityId.NOTIFY_POST, listOf(BackendId.DIRECT), emptySet(),

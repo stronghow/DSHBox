@@ -10,12 +10,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,6 +58,7 @@ import androidx.core.content.FileProvider
 import com.dshbox.app.R
 import com.dshbox.app.ui.files.Breadcrumb
 import com.dshbox.app.ui.files.DividerColor
+import com.dshbox.app.ui.files.FileThumb
 import com.dshbox.app.ui.files.PageBg
 import com.dshbox.app.ui.files.SelectedRowBg
 import com.dshbox.app.ui.files.TextHint
@@ -171,13 +175,26 @@ internal fun SandboxFilePickerDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        // [补丁] 整屏对话框只放开宽度，`decorFitsSystemWindows` 保持默认 true
+        //（窗口自动避开系统栏）；否则对话框会铺到手势条之下，而该层拿不到
+        // navigationBars inset（恒为 0），下面的 padding 就成了空转，底栏会被压住。
+        // 内容再自行消费一次 navigationBars 内边距，把底栏（已选 N 项 / 取消 / 添加）
+        // 抬到导航栏之上。
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+        ),
     ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = PageBg(),
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // 整块内容（含底栏与列表最后一项）一起抬到导航栏之上；
+                    // 只在这里消费一次，列表无需再补 contentPadding（补了就是双份）。
+                    .windowInsetsPadding(WindowInsets.navigationBars),
+            ) {
                 // ── 头部：标题 + 返回上级 + 关闭 ──────────────
                 Row(
                     modifier = Modifier
@@ -434,11 +451,12 @@ private fun PickerRow(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = if (isDir) ImageVector.vectorResource(CommonR.drawable.ic_folder) else ImageVector.vectorResource(CommonR.drawable.ic_file),
-            contentDescription = null,
+        // [补丁] 挑图当附件时得靠缩略图认出是哪张（此前只有通用文件图标）
+        FileThumb(
+            file = file,
+            isDirectory = isDir,
+            size = 40.dp,
             tint = if (isDir) MaterialTheme.colorScheme.primary else TextHint(),
-            modifier = Modifier.size(22.dp),
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {

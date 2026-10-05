@@ -79,17 +79,58 @@ class CapabilityArgsSpecTest {
             CapabilityId.UI_TAP,
             args("x" to 1, "y" to 2, "z" to 3),
         )
-        assertEquals("unknown arg: z — this call takes: x, y", reason)
+        // `display` 是后加的可选键，所以它出现在这张能力真正接受的键里 —— 清单与判据
+        // 同一张表，助手从这句就能看出该补哪个键。
+        assertEquals("unknown arg: z — this call takes: display, x, y", reason)
     }
 
-    /** 落点类键不是可以改对的拼写：措辞要把「执行面由用户偏好决定」这件事讲完。 */
+    /**
+     * 落点类键在那条**不收它**的能力上不是可以改对的拼写：措辞要把「执行面由用户偏好决定」
+     * 讲完，并指回真正收它的那几条。`screen.capture` 收 display 也没有意义 —— 它的落点
+     * 由执行面决定，加这个键只会得到这句话。
+     */
     @Test
     fun displayTargetingKeyGetsThePolicyWording() {
         val reason = CapabilityArgsSpec.validate(
-            CapabilityId.UI_TAP,
-            args("x" to 1, "y" to 2, "display" to 1),
+            CapabilityId.SCREEN_CAPTURE,
+            args("display" to 1),
         )
-        assertTrue(reason.orEmpty().contains("which display a call runs on is decided by the user's surface preference"))
+        assertTrue(reason.orEmpty().contains("does not take a display argument"))
+        assertTrue(reason.orEmpty().contains("ui.snapshot"))
+    }
+
+    /**
+     * `display` 收在哪些能力上，必须与裁决层真正会去换算的那张名单逐条相等：
+     * 预校验放行、裁决层却不当回事，就是一次**静默落在别的屏上**的成功回包。
+     */
+    @Test
+    fun displayIsAcceptedExactlyWhereTheCoordinatorRoutesIt() {
+        CapabilityId.entries.forEach { id ->
+            val reason = CapabilityArgsSpec.validate(id, args("display" to 0))
+            val accepted = reason == null || !reason.startsWith("unknown arg: display")
+            assertEquals(
+                "${id.wire}：预校验的 display 放行与 DisplayTarget.CAPABILITIES 不一致" +
+                    "（预校验说 ${if (accepted) "收" else "不收"}，裁决层说" +
+                    "${if (id in interlock.relay.core.surface.DisplayTarget.CAPABILITIES) "收" else "不收"}）",
+                id in interlock.relay.core.surface.DisplayTarget.CAPABILITIES,
+                accepted,
+            )
+        }
+    }
+
+    /** 目标屏编号按整数值收：小数与字符串都不该走到裁决层才被拒。 */
+    @Test
+    fun displayMustBeAWholeNumberBeforeTheGate() {
+        assertEquals(
+            "display must be a number, got \"0\" (string)",
+            CapabilityArgsSpec.validate(CapabilityId.UI_TAP, args("x" to 1, "y" to 2, "display" to "0")),
+        )
+        assertTrue(
+            CapabilityArgsSpec.validate(CapabilityId.UI_TAP, args("x" to 1, "y" to 2, "display" to 1.5))
+                .orEmpty()
+                .startsWith("display must be a whole number"),
+        )
+        assertNull(CapabilityArgsSpec.validate(CapabilityId.UI_TAP, args("x" to 1, "y" to 2, "display" to 0)))
     }
 
     /** 节点级目标的类型判据与 NodeSelector 同口径：对象、数字，缺一即拒。 */

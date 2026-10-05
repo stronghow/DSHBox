@@ -15,6 +15,9 @@ import java.io.File
  *   Bitmap（同样尺寸按 ARGB_8888 算是 10.4MB 一份）。
  * - 换过一块屏就作废：`displayId` 与缓存里那个不一致时既不读也不写。拿上一块屏的画面
  *   给这一块屏说话，正是这条通路最不该犯的错误。
+ * - 换过**成像参数**也作废：存的是已编码字节，JPEG 的那份替不了 PNG 的那份，缩到 960 的
+ *   那份也替不了整屏的那份 —— 后缀与画面尺寸都会与调用方要的对不上。[signature] 就是
+ *   记这一组的，不一致时 [peek] 当作没有旧帧。
  * - 取用时间只在内存里，所以进程重启后即便文件还在也不会被端出去 —— 那一刻它有多旧已不可知。
  */
 class LastFrameCache(
@@ -26,8 +29,11 @@ class LastFrameCache(
     private var displayId = -1
     private var takenAtMs = 0L
 
+    /** 这一帧是按哪组成像参数编码的，见类注释。缺省 0 即「不问成像参数」的调用方。 */
+    private var signature = 0
+
     /** 一次成功的取帧。写不进去不该让这次调用失败，只是下一次静置时没有旧帧可给。 */
-    fun remember(display: Int, bytes: ByteArray): Boolean {
+    fun remember(display: Int, bytes: ByteArray, signature: Int = 0): Boolean {
         if (bytes.size.toLong() > maxBytes) {
             clear()
             return false
@@ -39,6 +45,7 @@ class LastFrameCache(
             onSuccess = {
                 displayId = display
                 takenAtMs = now()
+                this.signature = signature
                 true
             },
             onFailure = { clear(); false },
@@ -46,8 +53,8 @@ class LastFrameCache(
     }
 
     /** 取回 `(字节, 已经过了多久)`；没有可给的旧帧时返回 null，调用方据此回到不可达。 */
-    fun peek(display: Int): Pair<ByteArray, Long>? {
-        if (displayId != display || takenAtMs == 0L || !file.isFile) return null
+    fun peek(display: Int, signature: Int = 0): Pair<ByteArray, Long>? {
+        if (displayId != display || this.signature != signature || takenAtMs == 0L || !file.isFile) return null
         val bytes = runCatching { file.readBytes() }.getOrNull() ?: return null
         if (bytes.isEmpty()) return null
         // 单调时钟在重启时归零，而进程内存里的 takenAtMs 与之同源，所以差值不会为负；
@@ -59,6 +66,7 @@ class LastFrameCache(
     fun clear() {
         displayId = -1
         takenAtMs = 0L
+        signature = 0
         runCatching { file.delete() }
     }
 

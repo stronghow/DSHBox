@@ -2116,11 +2116,12 @@ private fun FileListRow(
                 Spacer(Modifier.width(12.dp))
             }
         }
-        Icon(
-            imageVector = if (entry.isDirectory) ImageVector.vectorResource(CommonR.drawable.ic_folder) else ImageVector.vectorResource(CommonR.drawable.ic_file),
-            contentDescription = null,
+        // [补丁] 缩略图/类型徽标：图片给真缩略图、APK 给应用图标，其余按类型区分
+        FileThumb(
+            file = File(entry.logicalPath),
+            isDirectory = entry.isDirectory,
+            size = 40.dp,
             tint = if (entry.isDirectory) PrimaryGreen else TextHint(),
-            modifier = Modifier.size(24.dp),
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -2234,11 +2235,12 @@ private fun FileGridCell(
             }
         }
         Spacer(Modifier.height(4.dp))
-        Icon(
-            imageVector = if (entry.isDirectory) ImageVector.vectorResource(CommonR.drawable.ic_folder) else ImageVector.vectorResource(CommonR.drawable.ic_file),
-            contentDescription = null,
+        // [补丁] 同上：网格视图也要看得出内容
+        FileThumb(
+            file = File(entry.logicalPath),
+            isDirectory = entry.isDirectory,
+            size = 40.dp,
             tint = if (entry.isDirectory) PrimaryGreen else TextHint(),
-            modifier = Modifier.size(32.dp),
         )
         Spacer(Modifier.height(8.dp))
         Text(
@@ -2326,11 +2328,12 @@ private fun SearchResultRow(
             .padding(horizontal = 24.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = if (result.isDirectory) ImageVector.vectorResource(CommonR.drawable.ic_folder) else ImageVector.vectorResource(CommonR.drawable.ic_file),
-                contentDescription = null,
+            // [补丁] 搜索结果同样给缩略图/类型徽标
+            FileThumb(
+                file = File(result.logicalPath),
+                isDirectory = result.isDirectory,
+                size = 28.dp,
                 tint = if (result.isDirectory) PrimaryGreen else TextHint(),
-                modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(10.dp))
             Text(

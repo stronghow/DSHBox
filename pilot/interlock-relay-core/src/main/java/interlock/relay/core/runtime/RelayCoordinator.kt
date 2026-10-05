@@ -18,6 +18,7 @@ import interlock.relay.core.protocol.retryPolicyOf
 import interlock.relay.core.exec.BackendCall
 import interlock.relay.core.exec.BackendResult
 import interlock.relay.core.exec.a11y.NodeSelector
+import interlock.relay.core.exec.direct.IntentTemplates
 import interlock.relay.core.interlock.ApprovalOutcome
 import interlock.relay.core.interlock.InterlockTargets
 import interlock.relay.core.interlock.ConsentSurfaces
@@ -33,6 +34,7 @@ import interlock.relay.core.log.RunLog
 import interlock.relay.core.runtime.monotonicNow
 import interlock.relay.core.storage.RelayPaths
 import interlock.relay.core.surface.BackendDispatcher
+import interlock.relay.core.surface.DisplayTarget
 import interlock.relay.core.surface.SurfaceDecision
 import interlock.relay.core.surface.SurfacePolicy
 import interlock.relay.core.transport.HandlerResult
@@ -77,6 +79,14 @@ class RelayCoordinator(
     private val probe: SystemStateProbe,
     /** 按编号回查节点归属，用于闸门判「目标是不是系统授权界面」。答不出就回 null。 */
     private val nodeOwner: (Int) -> interlock.relay.core.exec.RelayBackend.TargetOwner? = { null },
+    /**
+     * 可信虚拟屏此刻的编号；没有屏时为负数。
+     *
+     * `ui.*` 的显式 `display` 要靠它认账（见 `DisplayTarget`）：只接受「0（用户眼前那块屏）」
+     * 与「框架自己建出来的那块屏」两个编号，别的编号没有对应的执行面。与 `A11yBackend`、
+     * 能力清单读的是装配根同一个数，三处不能各问一次。
+     */
+    private val trustedDisplayId: () -> Int = { -1 },
     private val paths: RelayPaths,
     private val runLog: RunLog,
     private val auditLog: AuditLog,
@@ -106,6 +116,13 @@ class RelayCoordinator(
      * 「自己在后台模式里跑」，而这两种的处置完全相反（一个去系统里开通知，一个退出后台模式）。
      */
     private val approvalDeadEnd: () -> String? = { null },
+    /**
+     * 「把宿主自己带到前台」这条豁免开不开。默认 true = 与从前一致。
+     *
+     * 关掉它只会更啰嗦（收尾那一步要弹卡），不会更不安全；之所以开放，是因为它在
+     * "用户在别的应用里、确认卡看不见"的时刻最常触发，有些用户宁愿自己切回来。
+     */
+    private val hostBringToFrontEnabled: () -> Boolean = { true },
 ) : RelayRequestHandler {
 
     private val appContext = context.applicationContext
@@ -154,7 +171,8 @@ class RelayCoordinator(
         // 助手拿本机身份做参数的一律挡下。参数键名不止 `package` 一个，
         // 因此扫全部字符串值而不是逐个键名匹配——漏一个键就等于留一个后门。
         // 唯一的例外是「把宿主带到前台」：任务链的收尾一步，见 isHostBringToFront。
-        val bringToFront = isHostBringToFront(request)
+        // 这一条豁免本身也可由用户在设置里关掉（默认开着，行为与从前一致）。
+        val bringToFront = isHostBringToFront(request) && hostBringToFrontEnabled()
         val selfArg = selfTargetArg(request.args, selfPackage)
         if (selfArg != null && !bringToFront) {
             // 回包点名撞在哪个参数上：整条调用指向宿主与被顺带写进过滤条件，是两种处置
@@ -203,12 +221,31 @@ class RelayCoordinator(
         val (targetLabel, paramDetail) = InterlockTargets.of(descriptor, request.args) { count ->
             String.format(text.string(interlock.relay.core.R.string.relay_approval_char_count), count)
         }
-        val decision = if (bringToFront) {
+        // 显式目标屏（`ui.*` 的可选 `display`）排在偏好链之前：助手点了名，这一趟就落在
+        // 那块屏上。换算只做一次（displayId → 执行面），换出来的面后面照常走权限探测、
+        // 后端选择与执行 —— 两条通路用的仍是各自既有的那套坐标与取树规则。
+        // 不传这个键时 [DisplayTarget.resolve] 回 Unspecified，路由一个字节都不变。
+        val displayTarget = DisplayTarget.resolve(descriptor.id, request.args, trustedDisplayId())
+        if (displayTarget is DisplayTarget.Resolution.Bad) {
+            // 与后端参数错误同一个错误码：这是脚本写错了要改的入参，不是通道故障。
+            return HandlerResult.Done(
+                rejected(
+                    request.id,
+                    RelayError.TRANSPORT_MALFORMED,
+                    displayTarget.reason,
+                    descriptor,
+                    elapsed(),
+                ),
+            )
+        }
+        val decision = when {
             // 收尾回宿主这一形状必须落在用户眼前的屏上：后台优先模式下它会被派去可信虚拟屏，
             // 应用起在那块屏上、用户根本看不到——而这恰恰是这条命令要修的事。
-            SurfaceDecision(SurfaceKind.FOREGROUND)
-        } else {
-            policy.decide(descriptor)
+            bringToFront -> SurfaceDecision(SurfaceKind.FOREGROUND)
+            // 点名了屏就不再报降级：`degraded` 说的是「用户要的那个模式没给到」，
+            // 而这里给的正是调用方点名要的那块屏。回包的 surface 字段照实写落点。
+            displayTarget is DisplayTarget.Resolution.To -> SurfaceDecision(displayTarget.surface)
+            else -> policy.decide(descriptor)
         }
         // 单一执行面的能力被偏好链卡死时（用户选了前台，而它只认可信屏）在这里点名
         // 「需要哪个模式」：不进闸门、不进后端——伪造的前台落点只会把一次注定失败的
@@ -284,6 +321,8 @@ class RelayCoordinator(
             system = system,
             // 收尾回宿主这一形状不走审批：它最常用的时刻正是用户看不到确认框的时刻。
             hostBringToFront = bringToFront,
+            // `sys.intent` 里那六条只上屏的模板不走审批，见 noStateChangeIntentShape。
+            noStateChangeIntent = noStateChangeIntentShape(descriptor, request.args),
         )
         // 等人点的那一段不该占着唯一执行窗口：答复会在任意时刻到来，而信箱后面还有无关
         // 请求在排。挂起面可用、预算装得下整段审批窗时，把等待移出执行槽——上面这轮
@@ -1129,3 +1168,15 @@ private fun childPath(parent: String, key: String): String {
     val name = key.ifEmpty { "<no-name>" }
     return if (parent.isEmpty()) name else "$parent.$name"
 }
+
+/**
+ * 「只上屏、不改状态」这一形状：`sys.intent` 里那六条模板（见 [IntentTemplates.noStateChange]）。
+ *
+ * 这是闸门那条免审批捷径的唯一判据，抽成顶层函数是为了能在 JVM 侧穷举验证：
+ * 它读的 `template` 键与确认框上那一行（`InterlockTargets.of` 的 SYS_INTENT 分支）同源，
+ * 两处不再各写一份模板名单。未知模板**不算**这一类：它会照旧走档位判定，也就不会出现
+ * 「先免弹放行、后在后端被判未知模板」这种一侧已批准的错位。
+ */
+internal fun noStateChangeIntentShape(descriptor: CapabilityDescriptor, args: JSONObject): Boolean =
+    descriptor.id == CapabilityId.SYS_INTENT &&
+        IntentTemplates.isNoStateChange(args.optString(IntentTemplates.KEY_TEMPLATE))

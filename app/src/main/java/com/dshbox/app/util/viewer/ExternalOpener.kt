@@ -61,6 +61,27 @@ object ExternalOpener {
         }
     }
 
+    /**
+     * 「安装」出口（[补丁]）：ACTION_VIEW + APK MIME，交给系统安装器。
+     * 直接用 content URI + 只读授权；**不做任何卸载/清数据/降级静默安装**，
+     * 覆盖安装由系统安装器与 CorePatch 既有流程决定，与本出口无关。
+     * 无安装器（或路径不在 FileProvider 授权根内）返回 false，调用方提示。
+     */
+    fun openInstall(context: Context, file: File): Boolean {
+        val uri = contentUri(context, file) ?: return false
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return try {
+            if (context.packageManager.queryIntentActivities(intent, 0).isEmpty()) return false
+            context.startActivity(intent)
+            true
+        } catch (_: android.content.ActivityNotFoundException) {
+            false
+        }
+    }
+
     /** 外部编辑（ACTION_EDIT）可启动的 Intent；无支持应用返回 null（调用方回退 VIEW）。 */
     fun buildEditIntent(context: Context, file: File, mime: String): Intent? {
         val uri = contentUri(context, file) ?: return null
