@@ -350,8 +350,12 @@ class PilotViewModel(
      * 判据名（`no_state_change`）不在回包正文里，由 [RulesDemo.decisionFrom] 从**授权记录**
      * 里按请求号读出来（`RelayContainer.diagnostics().auditLines`，与诊断页同源）。
      *
+     * [RulesDemo.RunRequest.pageKey] 非空时这一发是"用户自填设置页"：模板仍是 `settings.open`，
+     * 只是 `page` 换成那个自定义键 —— 参数照样过后端同一把尺子（[IntentTemplates] 的
+     * `validateSettings`，自定义页面键取自同一份目录快照）。
+     *
      * 三道闸都在这里：
-     * 1. 白名单 + 复算结论（[RulesDemo.canReallyOpen]）—— 不满足就**根本不发**；
+     * 1. 白名单 + 复算结论 + （页面）此刻还在页面表里（[RulesDemo.canRun]）—— 不满足就**根本不发**；
      * 2. 参数先过后端同一把尺子（`IntentTemplates.validate`，在 [RulesDemoRunner.sendTemplate] 里）；
      * 3. 回执若是"等待同意"，**立即停手**并把那张已经挂上的框收掉（DENY），按「会弹卡」呈现
      *    —— 设计上不该走到这里（按钮只对免弹条目开放），这是最后一道保险，不是免弹的依据。
@@ -361,23 +365,27 @@ class PilotViewModel(
      * 再回到这一页看回执。
      */
     internal fun simulateRunOnce(
-        template: String,
+        request: RulesDemo.RunRequest,
         hostPackage: String,
         onDone: (RulesDemoRunner.Outcome, String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val currentRaw = state.value.settingRows
+            val screenOnlyRaw = state.value.settingRows
                 .firstOrNull { it.spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES }?.value.orEmpty()
-            val args = RulesDemo.sampleArgs(template, hostPackage)
-            if (args == null || !RulesDemo.canReallyOpen(template, currentRaw)) {
+            val pagesRaw = state.value.settingRows
+                .firstOrNull { it.spec.id == RelaySettings.SETTINGS_PAGES }?.value.orEmpty()
+            val args = request.pageKey
+                ?.let { RulesDemo.pageArgs(it) }
+                ?: RulesDemo.sampleArgs(request.template, hostPackage)
+            if (args == null || !RulesDemo.canRun(request, screenOnlyRaw, pagesRaw)) {
                 onDone(
                     RulesDemoRunner.Outcome(
                         requestId = "",
                         ok = false,
                         timedOut = false,
                         errorCode = "E_DEMO_NOT_WHITELISTED",
-                        note = "这一条不在「真的开一次」的范围内（只开放给那 6 条内置的只上屏动作，" +
-                            "且此刻要在免问清单里）——没有发出去。",
+                        note = "这一条不在「真的开一次」的范围内（只开放给那 6 条内置只上屏动作、" +
+                            "以及你自填的设置页，且此刻要在免问清单里）——没有发出去。",
                     ),
                     null,
                 )
@@ -398,7 +406,7 @@ class PilotViewModel(
                 )
                 return@launch
             }
-            val outcome = RulesDemoRunner.sendTemplate(container.paths, template, args)
+            val outcome = RulesDemoRunner.sendTemplate(container.paths, request.template, args)
             val decision = outcome.requestId
                 .takeIf { it.isNotEmpty() }
                 ?.let { RulesDemo.decisionFrom(container.diagnostics().auditLines, it) }

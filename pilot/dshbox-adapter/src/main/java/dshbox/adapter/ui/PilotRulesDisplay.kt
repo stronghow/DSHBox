@@ -80,6 +80,19 @@ internal object RulesDisplay {
         "tier.per_capability" to "可单独配置每项能力的访问权限。",
     )
 
+    /**
+     * Link 型那一项的控制点在哪个页面 —— 人话名与各页标题（`values-zh` 里的 `pilot_page_*`）
+     * 逐字相同，单测直接对钉那份资源。
+     *
+     * 映射与页面里的 `linkTarget` 同一张表（`surface` / `privileged` / 其余进能力页）：
+     * 这里只回答"该去哪一页"，不负责导航。
+     */
+    fun linkPageLabel(target: String): String = when (target) {
+        "surface" -> "执行模式"
+        "privileged" -> "特权模式"
+        else -> "能力"
+    }
+
     /** 折叠态副标题：有覆盖用覆盖，没有就逐字用 schema 原文。 */
     fun summary(spec: RelaySettings.Spec): String = SUMMARIES[spec.id] ?: spec.summary
 

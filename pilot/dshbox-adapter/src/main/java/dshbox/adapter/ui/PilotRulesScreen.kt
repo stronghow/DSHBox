@@ -252,6 +252,18 @@ fun RulesPage(
      */
     val appPackage = LocalContext.current.packageName
 
+    /**
+     * 演示要用的现场读数：**免问清单的现值**与 `sys.intent` 此刻的档位。
+     * 两份都从界面已经读到的东西里取（`state.settingRows` / `state.rows`），
+     * 不另开读法、也不为演示多读一次内核状态。
+     */
+    val demoContext = DemoContext(
+        screenOnlyRaw = state.settingRows
+            .firstOrNull { it.spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES }?.value.orEmpty(),
+        tier = state.rows.firstOrNull { it.descriptor.id == CapabilityId.SYS_INTENT }?.state?.tier
+            ?: AccessTier.ASK,
+    )
+
     // 有草稿、且草稿与已存值不同 = 真的有未保存的更改。比较口径与控件里的编辑器逐字一致
     // （清单型按"一行一条"解码后再比，避免把格式差异当成"改过"）。
     val dirtyRows = edit.ids()
@@ -400,7 +412,8 @@ fun RulesPage(
                 ceilingOverridesJson = { viewModel.ceilingOverridesJson() },
                 effectiveCeiling = { viewModel.effectiveCeiling(it) },
                 // 「真的开一次」的唯一入口：宿主包名在这里取一次（示例参数与回前台那一发都用它）。
-                onSimulateRun = { template, onDone -> viewModel.simulateRunOnce(template, appPackage, onDone) },
+                onSimulateRun = { request, onDone -> viewModel.simulateRunOnce(request, appPackage, onDone) },
+                demo = demoContext,
                 confirmMode = confirmMode,
                 flashId = flashId,
             )
@@ -512,7 +525,8 @@ private fun GroupCard(
     captionRows: List<RelayContainer.CapabilityRow>,
     ceilingOverridesJson: () -> String,
     effectiveCeiling: (CapabilityDescriptor) -> String,
-    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    onSimulateRun: (RulesDemo.RunRequest, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    demo: DemoContext,
     confirmMode: String,
     flashId: String?,
 ) {
@@ -584,6 +598,7 @@ private fun GroupCard(
                         ceilingOverridesJson = ceilingOverridesJson,
                         effectiveCeiling = effectiveCeiling,
                         onSimulateRun = onSimulateRun,
+                        demo = demo,
                         confirmMode = confirmMode,
                         flashId = flashId,
                     )
@@ -733,7 +748,8 @@ private fun SettingRowItem(
     ceilingOverridesJson: () -> String,
     effectiveCeiling: (CapabilityDescriptor) -> String,
     /** 「真的开一次试试」的入口（[RulesDemo] 判过白名单与结论之后才会用上它）。 */
-    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    onSimulateRun: (RulesDemo.RunRequest, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    demo: DemoContext,
     confirmMode: String,
     flashId: String?,
 ) {
@@ -1007,12 +1023,15 @@ private fun SettingRowItem(
                         spec = spec,
                         current = row.value,
                         onApply = applySelf,
+                        demo = demo,
                     )
 
                     RelaySettings.Type.Document.Kind.SETTINGS_PAGES -> PageDocumentEditor(
                         spec = spec,
                         current = row.value,
                         onApply = applySelf,
+                        demo = demo,
+                        onSimulateRun = onSimulateRun,
                     )
 
                     RelaySettings.Type.Document.Kind.CEILING_OVERRIDES -> CeilingEditor(
@@ -1055,6 +1074,7 @@ private fun SettingRowItem(
                         ceilingOverridesJson = ceilingOverridesJson,
                         effectiveCeiling = effectiveCeiling,
                         onSimulateRun = onSimulateRun,
+                        demo = demo,
                         confirmMode = confirmMode,
                         flashId = flashId,
                     )
@@ -1063,16 +1083,46 @@ private fun SettingRowItem(
         }
     }
 
-    // ── 三期：「模拟运行一次」回到**折叠态**（全页唯一一处）──
-    // 不展开任何一块也看得见、点得开。位置在这一张卡正文的末尾：免问清单那一项把「改这一项」
-    // 摊开时，它正好落在标签组（以及「新增自定义动作」）的下一行 —— 就是用户草图上要的那一行。
-    // 点开的仍是二期那颗自绘遮罩层（三步演绎 + preview 原文 + 满意 / 再改改），零执行通路。
-    DashedActionButton(
-        onClick = { simulateOpen = true },
-        icon = "⚡",
-        tint = testInk(),
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-    ) { Text("模拟运行一次") }
+    // ── 三期：「模拟运行一次」在折叠态就看得见（全页唯一一处）──
+    // 七期（本次）加了**渲染规则**：这一项到底能不能对应上一发动作，由 [RulesDemo.demoEntry] 算出来 ——
+    // 能演才给这颗 ⚡（内置免问模板那一项走整项浮层，用户自填页面/动作的入口在卡片内部的行上），
+    // 不能演的（Link 型、数量型、执行模式、危险项……）一律不给按钮，改给一句准确的说明。
+    // 判定不许手写成一张"哪张卡显示按钮"的表：新增一条配置时它会自动落进某一支。
+    when (val entry = RulesDemo.demoEntry(spec, row.value)) {
+        is RulesDemo.DemoEntry.CardButton -> {
+            DashedActionButton(
+                onClick = { simulateOpen = true },
+                icon = "⚡",
+                tint = testInk(),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) { Text("模拟运行一次") }
+            Text(
+                text = entry.note,
+                style = MaterialTheme.typography.labelSmall,
+                lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+
+        is RulesDemo.DemoEntry.UserPages, is RulesDemo.DemoEntry.UserTemplates -> Text(
+            // 入口在下面的每一行上（页面行 / 动作行），这里只说一句它是什么。
+            text = entry.note,
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+
+        is RulesDemo.DemoEntry.Unavailable -> Text(
+            // 没有可模拟的运行就直说，并说明为什么 —— 不摆一颗点了说法含糊的按钮。
+            text = "这一项没有可模拟的运行：" + entry.note,
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
 
     pendingSwitch?.let { next ->
         DangerConfirmDialog(
@@ -1095,12 +1145,8 @@ private fun SettingRowItem(
             spec = spec,
             currentRaw = row.value,
             currentDisplay = valueSummary(row),
-            // 档位直接取界面自己那份能力行（`CapabilityRow.state.tier`，与闸门同一个 TierStore），
-            // 不另开一条读法、也不为演示多读一次内核状态。
-            sysIntentTier = captionRows
-                .firstOrNull { it.descriptor.id == CapabilityId.SYS_INTENT }
-                ?.state?.tier ?: AccessTier.ASK,
             onSimulateRun = onSimulateRun,
+            demo = demo,
             onSatisfied = {
                 simulateOpen = false
                 onNotice("好，就按这个来。这一项没有任何改动，刚才那一屏也没有执行任何系统动作。")
@@ -1250,9 +1296,9 @@ private fun SimulateDialog(
     spec: RelaySettings.Spec,
     currentRaw: String,
     currentDisplay: String,
-    /** 这条能力此刻的档位（界面自己已经读到的能力行；读不到时按默认「每次询问」兜底）。 */
-    sysIntentTier: AccessTier,
-    onSimulateRun: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    /** 演示要用的现场读数（免问清单现值 + 档位）。 */
+    demo: DemoContext,
+    onSimulateRun: (RulesDemo.RunRequest, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
     onSatisfied: () -> Unit,
     onAdjust: () -> Unit,
 ) {
@@ -1311,7 +1357,7 @@ private fun SimulateDialog(
         if (spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES) {
             ScreenOnlyDemoBlock(
                 currentRaw = currentRaw,
-                tier = sysIntentTier,
+                tier = demo.tier,
                 onRunOnce = onSimulateRun,
             )
         }
@@ -1356,7 +1402,7 @@ private fun SimulateDialog(
 private fun ScreenOnlyDemoBlock(
     currentRaw: String,
     tier: AccessTier,
-    onRunOnce: (String, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
+    onRunOnce: (RulesDemo.RunRequest, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
 ) {
     val items = RulesDemo.items(currentRaw, tier)
     val hostPackage = LocalContext.current.packageName
@@ -1388,21 +1434,21 @@ private fun ScreenOnlyDemoBlock(
         RulesDemoRow(
             item = item,
             hostPackage = hostPackage,
-            previewOpen = previewFor == item.template,
+            previewOpen = previewFor == item.key,
             onTogglePreview = {
-                previewFor = if (previewFor == item.template) null else item.template
+                previewFor = if (previewFor == item.key) null else item.key
             },
-            running = running == item.template,
-            // 只开放给白名单 ∩ 复算为"不会弹卡"的那几条；其余一律没有这颗按钮。
+            running = running == item.key,
+            // 只开放给白名单 ∩ 清单放行的那几条；其余一律没有这颗按钮。
             onRun = {
-                running = item.template
-                onRunOnce(item.template) { outcome, decision ->
-                    results[item.template] = outcome to decision
+                running = item.key
+                onRunOnce(RulesDemo.RunRequest(item.template, label = item.label)) { outcome, decision ->
+                    results[item.key] = outcome to decision
                     running = null
                 }
             },
             canRun = item.runsForReal && running == null,
-            result = results[item.template],
+            result = results[item.key],
         )
     }
 
@@ -1433,6 +1479,12 @@ private fun ScreenOnlyDemoBlock(
     }
 }
 
+/**
+ * 演示区的现场读数（免问清单现值 + `sys.intent` 档位），由 [RulesPage] 算一次、
+ * 往下传一层。**只有两个字段**：界面已经读到的东西，没有第三个来源。
+ */
+private data class DemoContext(val screenOnlyRaw: String, val tier: AccessTier)
+
 /** 一条动作在演示里的一行：结论 + 依据（＋可选的真开按钮 / 卡示意 / 回执）。 */
 @Composable
 private fun RulesDemoRow(
@@ -1445,6 +1497,59 @@ private fun RulesDemoRow(
     onRun: () -> Unit,
     result: Pair<RulesDemoRunner.Outcome, String?>?,
 ) {
+    DemoRowCard {
+        Text(
+            text = item.key,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "（${item.label}）· 档位：" + tierLabel(item.tier) +
+                if (item.extra) " · 清单里多出来的条目" else "",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        DemoConclusionLines(item)
+        if (item.runsForReal) {
+            DemoRealRun(
+                item = item,
+                hostPackage = hostPackage,
+                running = running,
+                canRun = canRun,
+                onRun = onRun,
+                result = result,
+            )
+        } else if (item.conclusion == RulesDemo.Conclusion.PROMPTS) {
+            DemoPreviewChip(previewOpen = previewOpen, onToggle = onTogglePreview)
+        }
+        if (previewOpen) {
+            ApprovalCardPreview(
+                template = item.template,
+                detail = RulesDemo.detailFor(item.template, null, hostPackage),
+            )
+        }
+    }
+}
+
+/** 演示区统一的行外壳：同一档圆角小片 + 统一内边距，页面行 / 动作行共用。 */
+@Composable
+private fun DemoRowCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), content = content)
+    }
+}
+
+/**
+ * **结论那两行**（标题 + 依据）—— 内置模板行、用户页面行、用户动作行共用同一处，
+ * 所以"界面说的"与"闸门算的"只有一份实现，不会三处各写一句。
+ */
+@Composable
+private fun DemoConclusionLines(item: RulesDemo.Item) {
     val accent = if (item.quiet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     val headline = when (item.conclusion) {
         RulesDemo.Conclusion.QUIET_BY_LIST -> "● 不会弹卡（免问清单放行）"
@@ -1452,119 +1557,244 @@ private fun RulesDemoRow(
         RulesDemo.Conclusion.PROMPTS -> "● 会弹卡"
         RulesDemo.Conclusion.BLOCKED -> "● 会被挡下（档位是禁止）"
     }
+    val subject = item.template
     val basis = when (item.conclusion) {
         RulesDemo.Conclusion.QUIET_BY_LIST ->
-            "依据：它在这份免问清单里 ⇒ 命中闸门里那条 no_state_change 捷径，直接执行。"
+            "依据：$subject 在这份免问清单里 ⇒ 命中闸门里那条 no_state_change 捷径，直接执行。"
         RulesDemo.Conclusion.QUIET_BY_TIER ->
-            "依据：它不在免问清单里，但这能力的档位是「完全访问」⇒ 闸门走档位判定那条路" +
+            "依据：$subject 不在免问清单里，但这能力的档位是「完全访问」⇒ 闸门走档位判定那条路" +
                 "（那条的判据名是 auto），与免问清单无关。"
         RulesDemo.Conclusion.PROMPTS ->
-            "依据：不在免问清单里，档位也不是「完全访问」⇒ 先弹一张卡问你。"
+            "依据：$subject 不在免问清单里，档位也不是「完全访问」⇒ 先弹一张卡问你。"
         RulesDemo.Conclusion.BLOCKED ->
             "依据：这条能力的档位是「禁止」⇒ 当场挡下（判据名 tier_denied，回执是 " +
                 "E_GATE_HOST_DENIED），弹卡都轮不到。"
     }
-    Surface(
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-            Text(
-                text = item.template,
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
+    Text(
+        text = headline,
+        style = MaterialTheme.typography.bodyMedium,
+        color = accent,
+        modifier = Modifier.padding(top = 4.dp),
+    )
+    Text(
+        // 依据就是判据本身：走的是哪一步、判据名叫什么，明写出来。
+        text = basis,
+        style = MaterialTheme.typography.labelSmall,
+        lineHeight = 17.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+    if (item.disagrees) {
+        // 只可能是"页面读到的清单比闸门手里的快照旧"：如实说，并以闸门为准。
+        Text(
+            text = "⚠ 这一页读到的清单与闸门此刻手里的快照不一致（页面值可能刚被改过还没刷新）——" +
+                "上面的结论按闸门口径给。",
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+    if (item.extra) {
+        Text(
+            text = if (item.template == IntentTemplates.ALARM_SET || item.template == IntentTemplates.TIMER_SET) {
+                "⚠ 不在演示范围：这一条会真的建出闹钟 / 计时器，演示不试跑它。"
+            } else {
+                "⚠ 不在演示范围：这一条不是内置的只上屏动作，我们无法确认它只上屏，演示不试跑它。"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/** 「会弹卡」那张卡的示意入口（只在结论真是"会弹卡"的那一支上给）。 */
+@Composable
+private fun DemoPreviewChip(previewOpen: Boolean, onToggle: () -> Unit) {
+    PilotSmallChip(onClick = onToggle, modifier = Modifier.padding(top = 8.dp)) {
+        Text(if (previewOpen) "收起这张卡 ▴" else "会弹卡：看看这张卡长什么样 ▾")
+    }
+}
+
+/**
+ * 「真的开一次」那一块：按钮 + 一句真话 + 回执。同一时刻只发一条 —— 另一条还在等回执时
+ * 这一条**不渲染按钮**（虚线框按钮没有禁用态，要禁用就别渲染）。
+ */
+@Composable
+private fun DemoRealRun(
+    item: RulesDemo.Item,
+    hostPackage: String,
+    running: Boolean,
+    canRun: Boolean,
+    onRun: () -> Unit,
+    result: Pair<RulesDemoRunner.Outcome, String?>?,
+    argsNote: String? = null,
+) {
+    when {
+        running -> Text(
+            text = "正在真发这一发…（最多等 12 秒）",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+
+        canRun -> DashedActionButton(
+            onClick = onRun,
+            icon = "⚡",
+            pill = true,
+            tint = testInk(),
+            modifier = Modifier.padding(top = 8.dp),
+        ) { Text(if (item.custom) "真的打开一次" else "真的开一次试试") }
+
+        else -> Text(
+            text = "另一条正在真发…等它回执之后再试这一条。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+    Text(
+        text = "它是真发（走真闸门 → 真 sys.intent）：你会被真的带到那个页面，2～3 秒后自动回到这一页。" +
+            (argsNote ?: ("示例参数：" + (RulesDemo.sampleDetail(item.template, hostPackage) ?: "这一发不需要参数"))),
+        style = MaterialTheme.typography.labelSmall,
+        lineHeight = 17.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 3.dp),
+    )
+    result?.let { (outcome, decision) -> DemoRunReceipt(outcome = outcome, decision = decision) }
+}
+
+/**
+ * **用户自填设置页**的一行（任务 B）：结论按同一个真闸门算（`settings.open` + `page=<这个键>`），
+ * 只有"清单放行 ⇒ 本来就不会弹卡"时才给真开；而且真开前**再问一次**：
+ * 这件事会把用户当前的界面切走，不能靠一次误触决定。
+ */
+@Composable
+private fun UserPageDemoRow(
+    pageKey: String,
+    pageName: String,
+    item: RulesDemo.Item,
+    running: Boolean,
+    canRun: Boolean,
+    onRun: () -> Unit,
+    result: Pair<RulesDemoRunner.Outcome, String?>?,
+) {
+    val hostPackage = LocalContext.current.packageName
+    var previewOpen by remember { mutableStateOf(false) }
+    var confirming by remember { mutableStateOf(false) }
+    DemoRowCard {
+        Text(
+            text = pageKey,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "（$pageName）· 这一发是 settings.open + page=$pageKey · 档位：" + tierLabel(item.tier),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        DemoConclusionLines(item)
+        if (item.runsForReal) {
+            DemoRealRun(
+                item = item,
+                hostPackage = hostPackage,
+                running = running,
+                canRun = canRun,
+                onRun = { confirming = true },
+                result = result,
+                argsNote = "参数：page=$pageKey。",
             )
-            Text(
-                text = "（${item.label}）· 档位：" + tierLabel(item.tier) +
-                    if (item.extra) " · 清单里多出来的条目" else "",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = headline,
-                style = MaterialTheme.typography.bodyMedium,
-                color = accent,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text(
-                // 依据就是判据本身：走的是哪一步、判据名叫什么，明写出来。
-                text = basis,
-                style = MaterialTheme.typography.labelSmall,
-                lineHeight = 17.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-            if (item.disagrees) {
-                // 只可能是"页面读到的清单比闸门手里的快照旧"：如实说，并以闸门为准。
-                Text(
-                    text = "⚠ 这一页读到的清单与闸门此刻手里的快照不一致（页面值可能刚被改过还没刷新）——" +
-                        "上面的结论按闸门口径给。",
-                    style = MaterialTheme.typography.labelSmall,
-                    lineHeight = 17.sp,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
+        } else {
+            // 没有按钮时按**这一条的结论**说清为什么：会弹卡 ⇒ 只给卡示意；靠档位免开 ⇒ 不给按钮
+            // （档位一改就会真弹卡）；档位禁止 ⇒ 发出去只会被挡下。
+            val why = when (item.conclusion) {
+                RulesDemo.Conclusion.PROMPTS ->
+                    "这一发现在会弹卡：演示只给你看那张卡的样子，不替你按下它。" +
+                        "自定义页面的 action 是你从系统里抄来的任意字符串，更要你自己确认。"
+                RulesDemo.Conclusion.QUIET_BY_TIER ->
+                    "这一发现不会弹卡，但免开是档位给的（不是免问清单）：档位一改就会真弹卡，" +
+                        "所以演示不替你按这一发。"
+                RulesDemo.Conclusion.BLOCKED ->
+                    "这条能力的档位是「禁止」：发出去只会被挡下，演示不发这一发。"
+                RulesDemo.Conclusion.QUIET_BY_LIST -> ""
             }
-            if (item.extra) {
+            if (why.isNotEmpty()) {
                 Text(
-                    text = if (item.template == IntentTemplates.ALARM_SET || item.template == IntentTemplates.TIMER_SET) {
-                        "⚠ 不在演示范围：这一条会真的建出闹钟 / 计时器，演示不试跑它。"
-                    } else {
-                        "⚠ 不在演示范围：这一条不是内置的只上屏动作，我们无法确认它只上屏，演示不试跑它。"
-                    },
+                    text = why,
                     style = MaterialTheme.typography.labelSmall,
                     lineHeight = 17.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
-
-            if (item.runsForReal) {
-                // 唯一一颗会执行真实动作的按钮：⚡ + 测试蓝，与「模拟运行一次」同一套壳与色。
-                if (running) {
-                    Text(
-                        text = "正在真发这一发…（最多等 12 秒）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                } else if (canRun) {
-                    DashedActionButton(
-                        onClick = onRun,
-                        icon = "⚡",
-                        pill = true,
-                        tint = testInk(),
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) { Text("真的开一次试试") }
-                } else {
-                    // 同一时刻只发一条：另一条还在等回执时，这一条**不渲染按钮**（虚线框按钮没有禁用态）。
-                    Text(
-                        text = "另一条正在真发…等它回执之后再试这一条。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
+            if (item.conclusion == RulesDemo.Conclusion.PROMPTS) {
+                DemoPreviewChip(previewOpen = previewOpen, onToggle = { previewOpen = !previewOpen })
+            }
+        }
+        if (previewOpen) {
+            ApprovalCardPreview(template = item.template, detail = pageKey)
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("真的打开「$pageName」？") },
+            text = {
                 Text(
-                    text = "它是真发（走真闸门 → 真 sys.intent）：你会被真的带到那个页面，2～3 秒后自动回到这一页。" +
-                        "示例参数：" + (RulesDemo.sampleDetail(item.template, hostPackage) ?: "这一发不需要参数"),
-                    style = MaterialTheme.typography.labelSmall,
-                    lineHeight = 17.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 3.dp),
+                    "会真的走一次真闸门（不绕）：你的当前界面会被切走，2～3 秒后自动回到这一页。" +
+                        "上面已经算过：这一发现在不会弹卡。",
                 )
-                result?.let { (outcome, decision) -> DemoRunReceipt(outcome = outcome, decision = decision) }
-            } else if (item.conclusion == RulesDemo.Conclusion.PROMPTS) {
-                PilotSmallChip(onClick = onTogglePreview, modifier = Modifier.padding(top = 8.dp)) {
-                    Text(if (previewOpen) "收起这张卡 ▴" else "会弹卡：看看这张卡长什么样 ▾")
-                }
-            }
+            },
+            confirmButton = { TextButton(onClick = { confirming = false; onRun() }) { Text("打开") } },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("取消") } },
+        )
+    }
+}
 
-            if (previewOpen) {
-                ApprovalCardPreview(template = item.template, hostPackage = hostPackage)
-            }
+/**
+ * **用户自填动作**的一行：结论照算（自定义名字写进免问清单时闸门也认，这正是要让人看见的），
+ * 但**永不真开** —— action 是用户写死的任意字符串，我们无法确认它只上屏。
+ */
+@Composable
+private fun UserTemplateDemoRow(
+    templateId: String,
+    templateName: String,
+    item: RulesDemo.Item,
+) {
+    val hostPackage = LocalContext.current.packageName
+    var previewOpen by remember { mutableStateOf(false) }
+    DemoRowCard {
+        Text(
+            text = templateId,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = "（$templateName）· 档位：" + tierLabel(item.tier),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        DemoConclusionLines(item)
+        Text(
+            text = "自定义动作一律不真开：它的 action 是你自己写死的任意字符串，" +
+                "我们没法确认它只上屏 —— 试跑它就不叫演示了。",
+            style = MaterialTheme.typography.labelSmall,
+            lineHeight = 17.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        if (item.conclusion == RulesDemo.Conclusion.PROMPTS) {
+            DemoPreviewChip(previewOpen = previewOpen, onToggle = { previewOpen = !previewOpen })
+        }
+        if (previewOpen) {
+            ApprovalCardPreview(
+                template = templateId,
+                detail = RulesDemo.detailFor(templateId, null, hostPackage),
+            )
         }
     }
 }
@@ -1635,7 +1865,7 @@ private fun DemoRunReceipt(outcome: RulesDemoRunner.Outcome, decision: String?) 
  * 与真卡逐项对齐；**同时它整块不可点**（按钮只是画出来的，避免"点了没反应"）。
  */
 @Composable
-private fun ApprovalCardPreview(template: String, hostPackage: String) {
+private fun ApprovalCardPreview(template: String, detail: String?) {
     val night = isSystemInDarkTheme()
     val cardColor = Color(CardPalette.cardColor(night))
     val textColor = Color(CardPalette.textColor(night))
@@ -1644,7 +1874,6 @@ private fun ApprovalCardPreview(template: String, hostPackage: String) {
     // 真卡上那行标题就是这条能力的标题（`ApprovalPrompt.titleRes`）。
     val capTitle = CapabilityRegistry.find(CapabilityId.SYS_INTENT)?.titleRes
         ?.let { stringResource(it) } ?: "系统语义入口"
-    val detail = RulesDemo.sampleDetail(template, hostPackage)
 
     Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Surface(
@@ -3337,6 +3566,7 @@ private fun TemplateDocumentEditor(
     spec: RelaySettings.Spec,
     current: String,
     onApply: (String, String) -> Unit,
+    demo: DemoContext,
 ) {
     val templates = IntentTemplateCatalog.decodeTemplates(current)
     var draft by remember { mutableStateOf<TemplateDraft?>(null) }
@@ -3362,6 +3592,17 @@ private fun TemplateDocumentEditor(
                         "已删除：${template.name}",
                     )
                 },
+            )
+            // 任务 A③：自定义动作只给结论 + 会弹卡的卡示意 —— 永不真开（见 RulesDemo.Item.realRunEligible）。
+            UserTemplateDemoRow(
+                templateId = template.id,
+                templateName = template.name,
+                item = RulesDemo.userTemplateRow(
+                    id = template.id,
+                    name = template.name,
+                    currentRaw = demo.screenOnlyRaw,
+                    tier = demo.tier,
+                ),
             )
         }
         if (templates.isEmpty()) {
@@ -3407,9 +3648,14 @@ private fun PageDocumentEditor(
     spec: RelaySettings.Spec,
     current: String,
     onApply: (String, String) -> Unit,
+    demo: DemoContext,
+    onSimulateRun: (RulesDemo.RunRequest, (RulesDemoRunner.Outcome, String?) -> Unit) -> Unit,
 ) {
     val pages = IntentTemplateCatalog.decodePages(current)
     var draft by remember { mutableStateOf<PageDraft?>(null) }
+    // 页面行各自的现场状态：正在真开 / 那一条的回执。身份用页面键（页面可以被改名，键不能重复）。
+    var runningKey by remember { mutableStateOf<String?>(null) }
+    val pageResults = remember { mutableStateMapOf<String, Pair<RulesDemoRunner.Outcome, String?>>() }
     Column {
         Text(
             "给 settings.open 加一个新页面键。页面键是助手调用时写的那一个词（小写英文），" +
@@ -3427,6 +3673,29 @@ private fun PageDocumentEditor(
                     val rest = pages.filter { it.key != page.key }
                     onApply(IntentTemplateCatalog.encodePages(rest), "已删除：${page.name}")
                 },
+            )
+            // 任务 B：入口只在**用户自填的页面行**上，结论与内置模板同一处判据（settings.open）。
+            UserPageDemoRow(
+                pageKey = page.key,
+                pageName = page.name,
+                item = RulesDemo.pageRow(page.key, page.name, demo.screenOnlyRaw, demo.tier),
+                running = runningKey == page.key,
+                canRun = runningKey == null &&
+                    RulesDemo.pageRow(page.key, page.name, demo.screenOnlyRaw, demo.tier).runsForReal,
+                onRun = {
+                    runningKey = page.key
+                    onSimulateRun(
+                        RulesDemo.RunRequest(
+                            template = IntentTemplates.SETTINGS_OPEN,
+                            pageKey = page.key,
+                            label = page.name,
+                        ),
+                    ) { outcome, decision ->
+                        pageResults[page.key] = outcome to decision
+                        runningKey = null
+                    }
+                },
+                result = pageResults[page.key],
             )
         }
         if (pages.isEmpty()) {

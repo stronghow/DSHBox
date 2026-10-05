@@ -1,7 +1,9 @@
 package dshbox.adapter.ui
 
+import interlock.relay.core.exec.direct.IntentTemplateCatalog
 import interlock.relay.core.exec.direct.IntentTemplates
 import interlock.relay.core.protocol.AccessTier
+import interlock.relay.core.settings.RelaySettings
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -79,40 +81,56 @@ object RulesDemo {
      *
      * 正常情况 [recomputed] == [screenOnly]（同一份现值）；两值不等只可能是"页面读到的值
      * 比闸门手里的快照旧"，那时以闸门为准（[screenOnly]），并在界面上如实点出不一致。
+     *
+     * [key] 是这一行的身份（内置/自定义模板就是模板名；**用户自填的设置页是它的页面键**），
+     * [template] 是这一发真正过闸门用的模板名（用户设置页恒为 `settings.open`）。
      */
     data class Item(
+        val key: String,
         val template: String,
         val label: String,
         val inList: Boolean,
         val recomputed: Boolean,
         val screenOnly: Boolean,
-        val inDemoScope: Boolean,
+        /** 在内置那 6 条白名单里（真开的第一道门；用户自造的名字永远不在）。 */
+        val whitelisted: Boolean,
+        /** 这一行是不是用户自填的（页面 / 动作）——界面据此换一句说明。 */
+        val custom: Boolean,
         val tier: AccessTier,
         val conclusion: Conclusion,
+        /**
+         * 这一行**有没有资格**真开（第二道门，按种类定）。
+         *
+         * 内置模板与用户自填页面为 true；**用户自填动作恒为 false** —— 它的 action 是用户写死的
+         * 任意字符串，我们无法确认它只上屏，所以永不真开（与"临时清单里有没有它"无关）。
+         */
+        val realRunEligible: Boolean,
     ) {
         /** 结论是不是"这一发现在不会弹卡"（两条路都算）。 */
-        val quiet: Boolean get() = conclusion == Conclusion.QUIET_BY_LIST || conclusion == Conclusion.QUIET_BY_TIER
+        val quiet: Boolean
+            get() = conclusion == Conclusion.QUIET_BY_LIST || conclusion == Conclusion.QUIET_BY_TIER
 
         /** 免问清单这一条判据放行了吗（与 `isNoStateChange` 同值）。 */
         val quietByList: Boolean get() = conclusion == Conclusion.QUIET_BY_LIST
 
         /** 清单里多出来的条目（不在那 6 条硬编码白名单里）。 */
-        val extra: Boolean get() = !inDemoScope
+        val extra: Boolean get() = !whitelisted
 
         /** 页面读到的清单与闸门快照不一致（只可能是页面值滞后）。 */
         val disagrees: Boolean get() = recomputed != screenOnly
 
         /**
-         * 这一条允许出现「真的开一次试试」吗？
+         * 这一行允许出现「真的开一次」吗？四道都要过：
+         * ① 这一行的种类有资格（[realRunEligible]）；② 在内置白名单里（[whitelisted]）；
+         * ③ 这一页按同一份清单算出放行（[recomputed]）；④ 放行的原因是那条捷径本身
+         * （[Conclusion.QUIET_BY_LIST]）—— 不是档位给的。
          *
-         * 三道都要过：① 在硬编码白名单里；② 这一页按同一份清单算出放行（`recomputed`）；
-         * ③ 放行的原因是那条捷径本身（[Conclusion.QUIET_BY_LIST]）—— 不是档位给的。
-         *
-         * 于是「靠档位不弹」（[Conclusion.QUIET_BY_TIER]）与「档位是禁止」（[Conclusion.BLOCKED]）
-         * 都不开放试跑：前者一旦档位被改就会真弹卡，后者发出去只会被挡下。
-         * 宁可不给按钮，也不给一个真会弹卡或注定被挡的按钮。
+         * 于是「靠档位不弹」（[Conclusion.QUIET_BY_TIER]）、「档位是禁止」（[Conclusion.BLOCKED]）、
+         * 以及一切用户自造动作，都不开放真开：前者一旦档位被改就会真弹卡，中者发出去只会被挡下，
+         * 后者连"只上屏"都无法确认。宁可不给按钮，也不给一个真会弹卡或注定被挡的按钮。
          */
-        val runsForReal: Boolean get() = inDemoScope && recomputed && conclusion == Conclusion.QUIET_BY_LIST
+        val runsForReal: Boolean
+            get() = realRunEligible && whitelisted && recomputed && conclusion == Conclusion.QUIET_BY_LIST
     }
 
     /**
@@ -129,6 +147,47 @@ object RulesDemo {
     }
 
     /**
+     * **用户自填设置页**的一行。它底下那一发就是 `settings.open` + `page=<这个键>`
+     * （`IntentTemplates.validateSettings` 认的自定义页面键来自同一份目录快照），
+     * 所以结论就是 `settings.open` 的结论 —— 闸门看不到"页"这一层，只看模板名。
+     *
+     * 真开的资格与内置模板相同（`settings.open` 在白名单里）：靠的还是"清单放行 ⇒ 本来就不会弹卡"。
+     */
+    fun pageRow(
+        pageKey: String,
+        pageName: String,
+        currentRaw: String,
+        tier: AccessTier = AccessTier.ASK,
+    ): Item = buildGeneric(
+        key = pageKey,
+        template = IntentTemplates.SETTINGS_OPEN,
+        label = pageName + "（打开 $pageKey）",
+        currentRaw = currentRaw,
+        tier = tier,
+        custom = true,
+        realRunEligible = true,
+    )
+
+    /**
+     * **用户自填动作**的一行。结论按同一条闸门判据算（自定义名字写进免问清单时，闸门也认，
+     * 这正是这一屏要让人看见的），但 [Item.runsForReal] 恒为假：action 是用户写死的任意字符串。
+     */
+    fun userTemplateRow(
+        id: String,
+        name: String,
+        currentRaw: String,
+        tier: AccessTier = AccessTier.ASK,
+    ): Item = buildGeneric(
+        key = id,
+        template = id,
+        label = name,
+        currentRaw = currentRaw,
+        tier = tier,
+        custom = true,
+        realRunEligible = false,
+    )
+
+    /**
      * 一条动作的结论，按**闸门里那几步的真实顺序**定：
      * 档位「禁止」最先挡（`verdict` 在捷径之前）⇒ 再看免问清单那条捷径 ⇒ 再落到档位判定。
      */
@@ -139,17 +198,41 @@ object RulesDemo {
         else -> Conclusion.PROMPTS
     }
 
-    private fun build(template: String, list: List<String>, tier: AccessTier): Item {
+    private fun build(template: String, list: List<String>, tier: AccessTier): Item = buildGeneric(
+        key = template,
+        template = template,
+        label = RulesDisplay.actionLabel(template),
+        currentRaw = null,
+        list = list,
+        tier = tier,
+        custom = false,
+        realRunEligible = true,
+    )
+
+    private fun buildGeneric(
+        key: String,
+        template: String,
+        label: String,
+        currentRaw: String? = null,
+        list: List<String>? = null,
+        tier: AccessTier,
+        custom: Boolean,
+        realRunEligible: Boolean,
+    ): Item {
+        val decoded = list ?: decodeList(currentRaw.orEmpty())
         val screenOnly = IntentTemplates.isNoStateChange(template)
         return Item(
+            key = key,
             template = template,
-            label = RulesDisplay.actionLabel(template),
-            inList = template in list,
-            recomputed = screenOnlyNow(template, list),
+            label = label,
+            inList = template in decoded,
+            recomputed = screenOnlyNow(template, decoded),
             screenOnly = screenOnly,
-            inDemoScope = template in TEMPLATES,
+            whitelisted = template in TEMPLATES,
+            custom = custom,
             tier = tier,
             conclusion = conclude(screenOnly, tier),
+            realRunEligible = realRunEligible,
         )
     }
 
@@ -161,6 +244,157 @@ object RulesDemo {
      */
     fun screenOnlyNow(template: String, current: List<String>): Boolean =
         template.isNotEmpty() && template in current
+
+    /**
+     * 一项配置在演示里的落点。**由规则算出来**（值类型 + 值本身），不是手写的一张
+     * "哪张卡显示按钮"的表：新增一条配置时它自动落进某一支，不需要有人记得来改这里。
+     */
+    sealed interface DemoEntry {
+        val specId: String
+
+        /** 卡片上那句说明。能演的说"演什么"，不能演的说清"为什么没有可模拟的运行" —— 两种情况都必须给。 */
+        val note: String
+
+        /** 卡片正文末尾那颗 ⚡「模拟运行一次」（整项一个逐条浮层）。 */
+        data class CardButton(override val specId: String, override val note: String) : DemoEntry
+
+        /** 用户自填的设置页：入口在卡片内部**每一行页面**上（结论 + 放行时给真开）。 */
+        data class UserPages(
+            override val specId: String,
+            override val note: String,
+            val pages: List<String>,
+        ) : DemoEntry
+
+        /** 用户自填的动作：入口在卡片内部**每一行动作**上（只给结论与卡示意，永不真开）。 */
+        data class UserTemplates(
+            override val specId: String,
+            override val note: String,
+            val templates: List<String>,
+        ) : DemoEntry
+
+        /** 这一项没有可模拟的运行。 */
+        data class Unavailable(override val specId: String, override val note: String) : DemoEntry
+    }
+
+    /**
+     * 算出某一项配置的演示落点。三条结构化规则，按顺序判：
+     *
+     * 1. **值是"一组 `sys.intent` 动作"**：`IntentTemplateCatalog` 消费的那两种文档
+     *    （`SETTINGS_PAGES` / `INTENT_TEMPLATES`）—— 用户自填页面与动作都在这里；
+     * 2. 值类型是字符串集合、且它的**默认值逐元素等于** [IntentTemplates.noStateChange]
+     *    ⇒ 这就是"内置只上屏模板那一组"（schema 自己也写着与 core 同源同值）；
+     * 3. 其余一律 [DemoEntry.Unavailable]，并给一句按类别的准确说明（[unavailableNote]）。
+     *
+     * 第 1、2 条都依赖"值与 core 同源"这个事实：一旦 schema 的默认值和 core 的内置名单漂移，
+     * 单测会当场红 —— 这正是"不许手写表"的落点。
+     */
+    fun demoEntry(spec: RelaySettings.Spec, currentRaw: String): DemoEntry {
+        val type = spec.type
+        if (type is RelaySettings.Type.Document) {
+            when (type.kind) {
+                RelaySettings.Type.Document.Kind.SETTINGS_PAGES -> {
+                    val pages = IntentTemplateCatalog.decodePages(currentRaw)
+                    return if (pages.isEmpty()) {
+                        DemoEntry.Unavailable(
+                            spec.id,
+                            "这一项还没有你自己填的页面，所以现在没有可模拟的对象。" +
+                                "加上一条之后，每一行页面就能算「会不会弹卡」，放行的那些还能真的打开一次。",
+                        )
+                    } else {
+                        DemoEntry.UserPages(
+                            specId = spec.id,
+                            note = "你填的 ${pages.size} 个页面逐条按真闸门算：会不会弹卡；" +
+                                "放行的那些能真的打开一次（会先问你一次）。",
+                            pages = pages.map { it.key },
+                        )
+                    }
+                }
+
+                RelaySettings.Type.Document.Kind.INTENT_TEMPLATES -> {
+                    val templates = IntentTemplateCatalog.decodeTemplates(currentRaw)
+                    return if (templates.isEmpty()) {
+                        DemoEntry.Unavailable(
+                            spec.id,
+                            "这一项还没有你自己加的动作，所以现在没有可模拟的对象。" +
+                                "加上一条之后，每一行就能算结论、看卡示意 —— 自定义动作不真开。",
+                        )
+                    } else {
+                        DemoEntry.UserTemplates(
+                            specId = spec.id,
+                            note = "你加的 ${templates.size} 条动作逐条算结论、给卡示意：" +
+                                "action 是你自己写的任意字符串，所以不真开。",
+                            templates = templates.map { it.id },
+                        )
+                    }
+                }
+
+                else -> Unit // 上限覆盖表是一组别的设置，落到下面的通用说明
+            }
+        }
+        if (type is RelaySettings.Type.TextList &&
+            decodeList(spec.default).toSet() == IntentTemplates.noStateChange
+        ) {
+            return DemoEntry.CardButton(
+                specId = spec.id,
+                note = "逐条算：这一发会不会弹卡；那 6 条内置只上屏动作还能真的开一次。",
+            )
+        }
+        return DemoEntry.Unavailable(spec.id, unavailableNote(spec))
+    }
+
+    /**
+     * 不能演的那句准确说明。按"这一项为什么没有单独的一发动作"分类给，不用含糊说法：
+     * 显示偏好那条另外点明"演它要真建虚拟屏，我们不建"。
+     */
+    fun unavailableNote(spec: RelaySettings.Spec): String {
+        val type = spec.type
+        val reason = when {
+            spec.id == RelaySettings.SURFACE_PREFERENCE ->
+                "这一项决定助手在哪块屏上干活。要真演它就得先建一块虚拟屏 —— " +
+                    "我们不建虚拟屏，所以这里只说明，不模拟。"
+
+            type is RelaySettings.Type.Link ->
+                "这一项不产生单独的一发动作 —— 它的控制点在「" +
+                    RulesDisplay.linkPageLabel(type.target) + "」那一页，所以这里没有可模拟的运行，" +
+                    "要改就去那里。"
+
+            type is RelaySettings.Type.Document ->
+                "这一项是一组别的设置（不是一次动作），所以没有可模拟的运行。"
+
+            spec.group == RelaySettings.Group.DANGER ->
+                "危险项改的是保护你的那道判据本身，不产生单独的一发动作，所以没有可模拟的运行。"
+
+            type is RelaySettings.Type.Number ->
+                "这一项是个数量 / 时长，不产生单独的一发动作，所以没有可模拟的运行。"
+
+            else ->
+                "这一项是个开关 / 取值，不产生单独的一发动作，所以没有可模拟的运行。"
+        }
+        // 还没接线的项另有实话要说：改了不生效，界面自己已经标了「暂不可改」。
+        return if (spec.wired) reason else reason + "（这一项目前还没接线，改了不生效。）"
+    }
+
+    /**
+     * 一次「真的开一次」的请求：内置模板，或用户自填的设置页（`settings.open` + `page`）。
+     */
+    data class RunRequest(
+        val template: String,
+        val pageKey: String? = null,
+        /** 回执里用来称呼这一发（人话）。 */
+        val label: String = template,
+    )
+
+    /** 用户自填页面的那一发参数：与 `settings.open` 既有校验同一条路（`IntentTemplates.validate`）。 */
+    fun pageArgs(pageKey: String): JSONObject =
+        JSONObject().put(IntentTemplates.KEY_TEMPLATE, IntentTemplates.SETTINGS_OPEN)
+            .put(IntentTemplates.KEY_PAGE, pageKey)
+
+    /** 卡面上"参数"那一行的取值（示例参数或用户页面的建）。 */
+    fun detailFor(template: String, pageKey: String?, hostPackage: String): String? =
+        if (pageKey != null) pageKey else sampleDetail(template, hostPackage)
+
+    /** 用户自填页面的键是否还在此刻的页面表里（页面被删掉之后不允许再用旧行发信）。 */
+    fun pageKeys(pagesRaw: String): List<String> = IntentTemplateCatalog.decodePages(pagesRaw).map { it.key }
 
     /**
      * 「真的开一次」的许可：**只认这 6 条硬编码白名单**，并且闸门此刻确实会免弹
@@ -179,6 +413,16 @@ object RulesDemo {
         template in TEMPLATES &&
             IntentTemplates.isNoStateChange(template) &&
             screenOnlyNow(template, decodeList(currentRaw))
+
+    /**
+     * 一次 [RunRequest] 的许可：内置模板走 [canReallyOpen]；用户自填页面还要**此刻真的还在页面表里**
+     * （行是上一帧画出来的，页面可能刚被删）。
+     */
+    fun canRun(request: RunRequest, screenOnlyRaw: String, pagesRaw: String): Boolean {
+        if (!canReallyOpen(request.template, screenOnlyRaw)) return false
+        val key = request.pageKey ?: return true
+        return key.isNotEmpty() && key in pageKeys(pagesRaw)
+    }
 
     /** 这一条的"示例参数"；表外名字回 null —— 没有参数也就无从试跑。 */
     fun sampleArgs(template: String, hostPackage: String): JSONObject? = when (template) {
