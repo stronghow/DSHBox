@@ -14,6 +14,25 @@ if (hasReleaseKeystore) {
     FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
 }
 
+// ---- 运行环境 assets：发布目录与路径 ---------------------------------------------
+// 运行环境大层（base/node/android-side/dsh）不进源码仓库，单独放在**仓库外**的发布目录
+// runtime/android-assets。下面的相对路径相对 **app/ 模块目录**解析，即
+// <仓库>/../runtime/android-assets —— 与仓库同级、不在仓库内（仓库在 /work/DSHBox 时落点是
+// /work/runtime/android-assets）。AGP 对不存在的 srcDir 只做静默跳过，于是缺件时会编出
+// 「看着成功、其实少了 4 个条目」的包：
+//   assets/runtime/android-side.tar.zst（及其 .sha256）、assets/dexopt/baseline.prof（及其 .profm）
+// 后果：全新安装 / 清过数据的设备上「在线导入 Linux 层」硬失败（自检未通过：android-side），
+// 覆盖升级不受影响（老设备数据分区里已有解包好的层）。故文件末尾的「运行环境 assets 缺件守卫」
+// 默认让构建失败，而不是静默丢包。
+// 路径可用 -Pdshbox.runtimeAssetsDir=<绝对路径> 覆盖；显式跳过检查用
+// -Pdshbox.allowMissingRuntimeAssets=true（理由与告警见守卫处）。
+val runtimeAssetsDir = file(
+    providers.gradleProperty("dshbox.runtimeAssetsDir").getOrElse("../../runtime/android-assets")
+)
+val allowMissingRuntimeAssets = providers.gradleProperty("dshbox.allowMissingRuntimeAssets")
+    .getOrElse("false")
+    .toBoolean()
+
 android {
     namespace = "com.dshbox.app"
     compileSdk = 36
@@ -75,7 +94,9 @@ android {
             // 运行环境大层（base/node/android-side/dsh）不进入源码仓库，单独放在发布目录
             // runtime/android-assets（runtime/ 与 dsh/ 子目录），保证打包后仍是 assets/runtime/*
             // 与 assets/dsh/* 路径。仓库单独 clone 时请先获取 runtime/。
-            assets.srcDirs("../../runtime/android-assets")
+            // 注意这是**相对 app/ 模块目录**的路径（解析为 <仓库>/../runtime/android-assets，仓库外、
+            // 与仓库同级，不是 <仓库>/runtime/...）；路径与缺件检查见下方「运行环境 assets 缺件守卫」。
+            assets.srcDirs(runtimeAssetsDir)
         }
     }
     packaging {
@@ -86,6 +107,74 @@ android {
         // 缺这一行整个 assemble 阶段就过不去（debug/release 都一样）。
         // 该文件是给 OSGi 用的，APK 里不需要。仅打包管道层面的排除，不改任何功能代码。
         resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+    }
+}
+
+// ---- 运行环境 assets 缺件守卫 -----------------------------------------------------
+// assets.srcDirs 指向的发布目录在仓库外，缺件时 AGP 只做静默跳过（见文件开头的说明），
+// 于是构建"成功"却丢包。这里默认让构建**当场失败**，并给出两种出路；只有显式开关才放行。
+val runtimeAssetsNeeded = listOf(
+    "runtime/android-side.tar.zst",
+    "runtime/android-side.tar.zst.sha256",
+    "dexopt/baseline.prof",
+    "dexopt/baseline.profm",
+)
+val runtimeAssetsHelp = """
+    |  期望路径：${runtimeAssetsDir.absolutePath}
+    |            由 app/build.gradle.kts 的 assets.srcDirs 指定，默认相对 app/ 模块目录解析为
+    |            <仓库>/../runtime/android-assets，可用 -Pdshbox.runtimeAssetsDir=<绝对路径> 覆盖。
+    |  为什么需要它：运行环境大层（base/node/android-side/dsh）不在源码仓库里，只存在于这个发布目录。
+    |            AGP 对不存在的 srcDir 只做静默跳过，缺件时会编出"看着成功"但少了下列条目的包：
+    |              assets/runtime/android-side.tar.zst          assets/runtime/android-side.tar.zst.sha256
+    |              assets/dexopt/baseline.prof                 assets/dexopt/baseline.profm
+    |            这种包装到全新安装或清过数据的设备上，「在线导入 Linux 层」会硬失败（自检未通过：
+    |            android-side）；覆盖升级不受影响（老设备数据分区里已有解包好的层）。
+    |  出路 ①（推荐）把发布目录摆到正确位置：与仓库**同级**的 runtime/android-assets。
+    |            例如仓库在 /work/DSHBox 时，落点是 /work/runtime/android-assets，
+    |            而不是 /work/DSHBox/runtime/android-assets。
+    |            也可以用 -Pdshbox.runtimeAssetsDir=/abs/path/to/android-assets 指向任意位置。
+    |  出路 ② 确实不需要运行环境（只出覆盖升级包 / 只想编译调试）时，显式跳过本检查：
+    |              ./gradlew :app:assembleDebug -Pdshbox.allowMissingRuntimeAssets=true
+    |            或在 gradle.properties 里写 dshbox.allowMissingRuntimeAssets=true。
+    |            此时产物将缺少 assets/runtime/** 与 assets/dexopt/**（影响见上），不可用于全新安装。
+""".trimMargin()
+if (!runtimeAssetsDir.isDirectory) {
+    if (allowMissingRuntimeAssets) {
+        logger.warn(
+            "[DSHBox] !!! dshbox.allowMissingRuntimeAssets=true：已跳过运行环境 assets 缺件检查。\n" +
+                "[DSHBox] !!! 产物将缺少 assets/runtime/** 与 assets/dexopt/**（android-side.tar.zst 及其 .sha256、\n" +
+                "[DSHBox] !!! baseline.prof/.profm），把它装到全新安装 / 清过数据的设备上会导致「在线导入 Linux 层」\n" +
+                "[DSHBox] !!! 失败（自检未通过：android-side）；只适合覆盖升级包或纯编译调试。\n" +
+                "[DSHBox] !!! 发布目录不存在：${runtimeAssetsDir.absolutePath}\n" +
+                runtimeAssetsHelp
+        )
+    } else {
+        throw GradleException(
+            "[DSHBox] 运行环境 assets 发布目录不存在，已中止构建（默认必须失败，避免静默丢包）。\n" +
+                runtimeAssetsHelp
+        )
+    }
+} else {
+    val runtimeSubEntries = runtimeAssetsDir.resolve("runtime")
+        .listFiles()?.map { it.name }?.sorted() ?: emptyList<String>()
+    val dexoptSubEntries = runtimeAssetsDir.resolve("dexopt")
+        .listFiles()?.map { it.name }?.sorted() ?: emptyList<String>()
+    logger.lifecycle(
+        "[DSHBox] 运行环境 assets 发布目录已包含：${runtimeAssetsDir.absolutePath}\n" +
+            "[DSHBox]   runtime/ ：${runtimeSubEntries.joinToString(", ").ifEmpty { "（无此子目录或为空）" }}\n" +
+            "[DSHBox]   dexopt/ ：${dexoptSubEntries.joinToString(", ").ifEmpty { "（无此子目录或为空）" }}"
+    )
+    val runtimeAssetsMissing = runtimeAssetsNeeded.filter { !runtimeAssetsDir.resolve(it).isFile }
+    if (runtimeAssetsMissing.isNotEmpty()) {
+        // 只告警不失败：目录在场说明发布流程已走通，缺条目更可能是"这次只增量发布某一层"（例如只更新
+        // dexopt 基线）；且 android-side 只影响清数据后的在线导入，覆盖升级不受影响，为它阻断全部构建
+        // 得不偿失。目录**整体**不存在则几乎必然是路径摆错/发布目录没同步，那种情况上面已直接失败。
+        logger.warn(
+            "[DSHBox] !!! 发布目录存在，但缺少以下条目：${runtimeAssetsMissing.joinToString(", ")}\n" +
+                "[DSHBox] !!! 缺 runtime/android-side.tar.zst（或 .sha256）时，全新安装 / 清过数据的设备上\n" +
+                "[DSHBox] !!! 「在线导入 Linux 层」会硬失败（自检未通过：android-side）；覆盖升级不受影响，\n" +
+                "[DSHBox] !!! 故此处只告警、不中止构建。要出全新安装包请补齐发布目录。"
+        )
     }
 }
 

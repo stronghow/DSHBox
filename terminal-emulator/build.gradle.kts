@@ -16,9 +16,15 @@ android {
 
         // ---- LOCAL BUILD ADAPTATION (aarch64 container) ----
         // The Android NDK ships no aarch64-Linux host toolchain, so ndkBuild cannot
-        // run here. Both externalNativeBuild blocks are disabled so that
-        // :app:assembleDebug can execute. Consequence: libtermux.so is NOT built and
-        // is therefore absent from the produced APK (terminal JNI unavailable).
+        // run here. Both externalNativeBuild blocks stay disabled so that
+        // :app:assembleDebug can execute.
+        // Historically libtermux.so was therefore NOT built and was absent from the
+        // produced APK (terminal JNI unavailable). That is no longer the case as of
+        // commit 657d6b2: the two prebuilt libraries are now tracked in the
+        // repository (app/src/main/jniLibs/{arm64-v8a,x86_64}/libtermux.so,
+        // byte-identical to the official v1.4.0 release APK) and ship with the APK
+        // through app/src/main/jniLibs/**, so terminal JNI works even with ndkBuild
+        // off. Do not conclude "libtermux.so is missing from the APK" from this block.
         // The three patched files are untouched; this is an unrelated build-script
         // adaptation for the local container build only.
 
