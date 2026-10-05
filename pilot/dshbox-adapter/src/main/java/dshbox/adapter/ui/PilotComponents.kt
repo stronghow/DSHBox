@@ -18,6 +18,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
@@ -380,15 +394,23 @@ fun PilotNote(text: String, modifier: Modifier = Modifier) {
  * 所以刻意用虚线框而不是实心按钮 —— 一眼能看出"这不是写入动作"。
  * 文字色由这里统一给主色（调用方只写 `Text("…")`，不带颜色参数）。
  */
+/**
+ * 虚线框按钮：**强调"这里还有一件事可以做"**，但语气比实心主按钮弱。
+ *
+ * 七期起可以换一支色（[tint]）：默认主色（配置类，如「＋ 新增自定义动作」），
+ * 传别的颜色就能把另一类动作区分开（如「⚡ 模拟运行一次」用测试蓝）——
+ * 虚线框本身表达"轻量动作"，色相 + 图标表达"这是哪一类"。
+ */
 @Composable
 fun DashedActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     icon: String? = null,
     pill: Boolean = false,
+    tint: Color = MaterialTheme.colorScheme.primary,
     content: @Composable RowScope.() -> Unit,
 ) {
-    val accent = MaterialTheme.colorScheme.primary
+    val accent = tint
     val line = MaterialTheme.colorScheme.outline
     val shape = if (pill) RoundedCornerShape(999.dp) else RoundedCornerShape(12.dp)
     val radius = if (pill) 999.dp else 12.dp
@@ -455,6 +477,98 @@ fun PilotSmallChip(
 @Composable
 fun PilotPagePadding(content: @Composable (Modifier) -> Unit) {
     content(Modifier.padding(PaddingValues(horizontal = 24.dp, vertical = 24.dp)))
+}
+
+/** 下拉列表的最大高度（长列表在这个高度里滚动，不把屏幕撑满）。 */
+val PILOT_MENU_MAX_HEIGHT: Dp = 320.dp
+
+/** 列表与窗口边缘至少留这么多，免得贴边或被状态栏/手势区吃掉。 */
+private val PILOT_MENU_EDGE: Dp = 8.dp
+
+/**
+ * 锚点感知的落点：**优先在锚点下方；下方装不下、上方更宽裕就翻到上方**；
+ * 两边都紧就贴着空间大的那一边，并且永远夹在窗口里（不溢出屏幕）。
+ *
+ * 判定依据（三个数都来自框架，不靠估算）：
+ * - `anchorBounds`：锚点在窗口里的位置（Popup 自己会给），`bottom` 以下、`top` 以上就是两个候选空间；
+ * - `popupContentSize`：**列表量出来的真实高度**（已被 [PILOT_MENU_MAX_HEIGHT] 夹过），不是估算值；
+ * - `windowSize`：窗口像素尺寸。
+ *
+ * 规则一句话：`下方剩余 < 列表高度 && 上方剩余 > 下方剩余` ⇒ 朝上弹，否则朝下；
+ * 最后两个方向都再夹进 `[边距, 窗口 - 内容 - 边距]`。
+ */
+private class AnchorAwareMenuPosition(private val edgePx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val edge = edgePx
+        val spaceBelow = windowSize.height - anchorBounds.bottom - edge
+        val spaceAbove = anchorBounds.top - edge
+        val flipUp = spaceBelow < popupContentSize.height && spaceAbove > spaceBelow
+        val rawY = if (flipUp) anchorBounds.top - popupContentSize.height else anchorBounds.bottom
+        val maxY = (windowSize.height - popupContentSize.height - edge).coerceAtLeast(edge)
+        val y = rawY.coerceIn(edge, maxY)
+        val maxX = (windowSize.width - popupContentSize.width - edge).coerceAtLeast(edge)
+        val x = anchorBounds.left.coerceIn(edge, maxX)
+        return IntOffset(x, y)
+    }
+}
+
+/**
+ * 下拉选择器容器（七期）：**可滚动、有最大高度、靠近屏幕底部时朝上弹**。
+ *
+ * 为什么不用 `DropdownMenu`：默认那一颗不限制高度，条目一多就会顶出屏幕；
+ * 这里用 [Popup] + 自写的 [PopupPositionProvider]，把"翻不翻"这件事握在自己手里，
+ * 而且列表高度是**量出来**的（`popupContentSize`），不需要估算。
+ *
+ * 点选后由调用方自己 `onDismiss()`（本组件不替它关）。
+ */
+@Composable
+fun PilotPickerMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    maxHeight: Dp = PILOT_MENU_MAX_HEIGHT,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (!expanded) return
+    // 边距换算成像素交给落点计算（那一步不是 @Composable，拿不到 LocalDensity）。
+    val edgePx = with(LocalDensity.current) { PILOT_MENU_EDGE.roundToPx() }
+    val position = remember(edgePx) { AnchorAwareMenuPosition(edgePx) }
+    Popup(
+        popupPositionProvider = position,
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Surface(
+            modifier = modifier.widthIn(min = 220.dp, max = 340.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shape = MaterialTheme.shapes.medium,
+            shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = maxHeight)
+                    .verticalScroll(rememberScrollState()),
+                content = content,
+            )
+        }
+    }
+}
+
+/** 下拉列表里的分组标题：轻一行字，不出现在写入值里（分类只是展示）。 */
+@Composable
+fun PilotPickerGroupLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 2.dp),
+    )
 }
 
 /**

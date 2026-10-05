@@ -1,5 +1,6 @@
 package dshbox.adapter.ui
 
+import interlock.relay.core.exec.direct.IntentTemplates
 import interlock.relay.core.settings.RelaySettings
 import org.json.JSONArray
 
@@ -288,15 +289,16 @@ internal object RulesDisplay {
      */
     fun stateWriteWarning(spec: RelaySettings.Spec, current: String): String? = when (spec.id) {
         RelaySettings.SCREEN_ONLY_TEMPLATES -> {
-            val writes = decodeList(current).filter { raw ->
+            // 八期：触发条件就是这一行（清单里出现了不在那 6 条「只上屏」名单上的名字）。
+            // 具体怎么说那句话由 stateWriteWarnings 按"出身"分派：内置会写系统的说"会写系统"，
+            // 未内置的说"无法确认它是否只上屏"。
+            val extras = decodeList(current).filter { raw ->
                 raw.isNotBlank() && SCREEN_ONLY_TAGS.none { it.first == raw }
             }
-            if (writes.isEmpty()) {
+            if (extras.isEmpty()) {
                 null
             } else {
-                "清单里有会写系统的动作：" +
-                    writes.joinToString("、") { rawItemLabel(it) } +
-                    "。这几条不再问你 —— 助手可以直接改设备状态。"
+                stateWriteWarnings(spec, current).joinToString(" ") { it.plain() }
             }
         }
 
@@ -311,6 +313,191 @@ internal object RulesDisplay {
     }
 
     // ───────────────────────── 正文瘦身：精简版「改了会怎样」 ─────────────────────────
+
+
+    // ─────────────────── 八期：清单里的动作属于哪一类（话必须是真的）───────────────────
+
+    /**
+     * 清单里一条动作的**出身**。这决定界面怎么描述它 —— 三种措辞各自对应一种事实，
+     * 不许拿"会写系统"去说一条我们根本判断不了的动作。
+     *
+     * - [BUILTIN_SCREEN_ONLY]：内置、且只用上屏（就是那 6 枚标签的动作，`IntentTemplates.noStateChange`）；
+     * - [BUILTIN_STATE_WRITE]：内置、但会改设备状态（`alarm.set` / `timer.set`）—— 说它"会写系统"是有依据的；
+     * - [CUSTOM_UNKNOWN]：**不在内置名单里**（用户自己加的名字）—— 我们**无法判断**它会不会写系统，
+     *   只能说"未内置、无法确认"，然后**照有风险处理**（保守，但不撒谎）。
+     */
+    enum class ActionKind { BUILTIN_SCREEN_ONLY, BUILTIN_STATE_WRITE, CUSTOM_UNKNOWN }
+
+    /** 一条动作的出身。认得出来靠的是两张内置名单，不猜。 */
+    fun actionKind(raw: String): ActionKind = when {
+        SCREEN_ONLY_TAGS.any { it.first == raw } -> ActionKind.BUILTIN_SCREEN_ONLY
+        raw in IntentTemplates.names -> ActionKind.BUILTIN_STATE_WRITE
+        else -> ActionKind.CUSTOM_UNKNOWN
+    }
+
+    /**
+     * 卡片警示的一句话：被动作名切成 [lead] + 名字 + [tail] 三段，
+     * 名字单独拿出来是为了在界面上**用等宽高亮**（`alarm.get` 一眼看得见是哪个）。
+     */
+    data class StateWriteWarning(
+        val kind: ActionKind,
+        val names: List<String>,
+        val lead: String,
+        val tail: String,
+    ) {
+        /** 拼回一句话（给读屏 / 纯文本回退用，也保证与老调用点逐字兼容）。 */
+        fun plain(): String = lead + names.joinToString("、") + tail
+    }
+
+    /**
+     * 卡片级警示的**结构化**版本：按出身分成几条，每条各自说自己的实话。
+     *
+     * 内置但会写系统的：说"会写系统"（schema 的 riskText 原话就是"把会写东西的动作加进来…"）。
+     * 未内置（用户自己加的）：**不说"会写系统"** —— 那是没有依据的断言；
+     * 只说"这是你自定义的动作（未内置），我们无法确认它是否只上屏，因此按有风险处理"。
+     */
+    fun stateWriteWarnings(spec: RelaySettings.Spec, current: String): List<StateWriteWarning> {
+        if (spec.id != RelaySettings.SCREEN_ONLY_TEMPLATES) return emptyList()
+        val extras = decodeList(current).filter { raw ->
+            raw.isNotBlank() && SCREEN_ONLY_TAGS.none { it.first == raw }
+        }
+        if (extras.isEmpty()) return emptyList()
+        val writes = extras.filter { actionKind(it) == ActionKind.BUILTIN_STATE_WRITE }
+        val customs = extras.filter { actionKind(it) == ActionKind.CUSTOM_UNKNOWN }
+        return buildList {
+            if (writes.isNotEmpty()) {
+                add(
+                    StateWriteWarning(
+                        kind = ActionKind.BUILTIN_STATE_WRITE,
+                        names = writes,
+                        lead = "清单里有会写系统的动作：",
+                        tail = "。这几条不再问你 —— 助手可以直接改设备状态。",
+                    ),
+                )
+            }
+            if (customs.isNotEmpty()) {
+                add(
+                    StateWriteWarning(
+                        kind = ActionKind.CUSTOM_UNKNOWN,
+                        names = customs,
+                        lead = "这是你自定义添加的动作（未内置）：",
+                        tail = "。我们无法确认它是否只上屏，所以按有风险处理 —— 这几条也不再问你，" +
+                            "助手会按这个名字原样执行。",
+                    ),
+                )
+            }
+        }
+    }
+
+    /** 卡片上要等宽高亮那几个名字（未内置的自定义动作）。 */
+    fun customActionNames(spec: RelaySettings.Spec, current: String): List<String> =
+        stateWriteWarnings(spec, current)
+            .filter { it.kind == ActionKind.CUSTOM_UNKNOWN }
+            .flatMap { it.names }
+
+    /**
+     * 清单里那些**未内置**的动作在界面上的分组标题（八期）。
+     *
+     * 老文案是"不认识，原样显示" —— 那像在推卸责任（是用户主动加的东西）；
+     * 现在中立、肯定用户的行为，同时把事实说清：不在内置名单里，助手按原样执行。
+     */
+    const val CUSTOM_ACTIONS_LABEL: String = "自定义动作（未内置，按原样执行）"
+
+    /** 混排进标签组之后，橙色标签旁边那一行说明（八期）。 */
+    const val CUSTOM_MIX_NOTE: String =
+        "橙色的是你自定义的动作：助手按名字原样执行；我们无法确认它只上屏，所以按有风险处理。"
+
+    /** 橙色标签怎么操作（八期：点=改，长按或 ✕=删）。 */
+    const val CUSTOM_CHIP_HINT: String =
+        "点橙色标签改名字；长按它、或点标签上的 ✕ 删掉（删之前会再问你一次）。"
+
+    /**
+     * 「按策略运行」状态行（八期）：把模式与清单里的自定义动作放在一句话里说清，
+     * 不再把自定义项单独摘出来当成"异常"。没有自定义动作时返回 null。
+     */
+    fun policyLine(mode: ScreenOnlyMode, customNames: List<String>): String? {
+        if (customNames.isEmpty()) return null
+        val (head, tail) = when (mode) {
+            ScreenOnlyMode.ALLOW_ALL -> "当前按策略运行：全部允许。" to "。这几条也免问。"
+            ScreenOnlyMode.ASK_ALL -> "当前按策略运行：全部询问。" to "。这几条也会先问你。"
+            ScreenOnlyMode.CUSTOM ->
+                "当前按策略运行：自定义允许。" to "。这几条按清单走（在清单里就免问、不在就先问你）。"
+        }
+        return head + "其中包含自定义动作：" + customNames.joinToString("、") + tail
+    }
+
+
+    // ─────────────────── 九期：设置页弹窗（文案 / 校验 / 参数录入）───────────────────
+
+    /** 弹窗正文只留这两句（九期）；技术细节整段移进旁边的 (i)，一句话没删。 */
+    const val PAGE_PRESET_SHORT: String =
+        "点上面按钮可快速填入内置页面。自定义页面要自己从系统里抄指令，助手不会替你猜。"
+
+    /** 上面那两句话背后的技术细节（九期从正文移进 (i)）：来源、写入形状、上限都在这里。 */
+    const val PAGE_PRESET_DETAIL: String =
+        "上面按钮里的动作串只有两处来源，都指得出源码：" +
+            "① 内置 8 个设置页（与实现同一批系统常量，`DirectBackend.settingsAction(page)`）；" +
+            "② 内置模板在用的那几个动作串（标了「不是设置页」，来自 `DirectBackend.buildTemplateIntent`）。" +
+            "附加参数每行一条 `键=值`：键名 `[A-Za-z_][A-Za-z0-9_.]{0,63}`、最多 16 条、" +
+            "值按形状推断（`true`/`false` → 开关，整数 → 数字，其余 → 文本）、单个值最长 200 字。" +
+            "调用代号（页面键）`[a-z][a-z0-9_]{1,30}`，不能与内置 8 页重名 —— 与配置中心同一套校验。"
+
+    /**
+     * 调用代号撞上内置页时的提示（九期：从"保存时才失败"改成**输入时就红**）。
+     *
+     * 依据是后端自己的话：`IntentTemplateCatalog.validatePages` 里
+     * `key in IntentTemplates.settingsPages -> return "页面键「$key」与内置页面重名"` ——
+     * 我们只是把它提前到输入框上显示，规则一个字没改。
+     */
+    const val PAGE_KEY_BUILTIN_TAKEN: String = "该代号已被内置页面使用，请修改。"
+
+    /** 调用代号与别的自定义页重复。 */
+    const val PAGE_KEY_DUPLICATE: String = "已经有一个自定义页用这个代号了，请换一个。"
+
+    /**
+     * 这一页会直接控制系统动作 —— 安全提示（九期换成人话，含义不变、不夸大也不隐瞒）。
+     * 注意它说的只是"可能出错"，**不**断言具体会改什么（那是我们判断不了的）。
+     */
+    const val PAGE_DANGER_NOTE: String =
+        "⚠️ 谨慎操作：自定义系统指令可能让助手运行出错，甚至影响手机系统。请确认你熟悉所填指令。"
+
+    /** 附加参数里有一行没有「=」（那行不会生效，原样保留不丢）。 */
+    const val PAGE_EXTRA_NO_EQUALS: String =
+        "有一行没有「=」：助手只读「键=值」的行，这一行不会生效（已原样保留）。"
+
+    /** 附加参数最多几条 —— 与 `IntentTemplateCatalog.MAX_EXTRAS` 同一个数（那边是 private，所以这页另立一份）。 */
+    const val PAGE_EXTRA_LIMIT: Int = 16
+
+    /** 单个参数值最长多少字（同上，对齐 `MAX_EXTRA_VALUE_CHARS`）。 */
+    const val PAGE_EXTRA_VALUE_LIMIT: Int = 200
+
+    /**
+     * 附加参数的一行。九期的结构化录入用它当内存模型：
+     *
+     * - 正常行 = `键=值`（[key] / [value]）；
+     * - 没有「=」的行用 [raw] 原样存着（助手不读它，但**不丢**——用户在弹窗里删掉之前它一直都在）。
+     *
+     * [text] 拼出来的就是**老路径逐字同一个形状**：`键=值`，每行一条。
+     */
+    data class ParamLine(val key: String, val value: String, val raw: String? = null) {
+        fun text(): String = raw ?: "$key=$value"
+    }
+
+    /** `键=值` 多行文本 → 结构化行（只读文本，不做任何改写）。 */
+    fun parseParamLines(text: String): List<ParamLine> = text.split('\n')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .map { line ->
+            if (line.contains('=')) {
+                ParamLine(key = line.substringBefore('=').trim(), value = line.substringAfter('=').trim())
+            } else {
+                ParamLine(key = "", value = "", raw = line)
+            }
+        }
+
+    /** 结构化行 → `键=值` 多行文本（写进配置的仍是这一串，形状与老路径一字不差）。 */
+    fun buildParamLines(rows: List<ParamLine>): String =
+        rows.filter { it.raw != null || it.key.isNotBlank() }.joinToString("\n") { it.text() }
 
     /**
      * 精简版只取原文开头的完整句子，**不裁剪句子内部**（截半句会读成另一件事）。

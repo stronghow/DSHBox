@@ -1,9 +1,13 @@
 package dshbox.adapter.ui
 
+import android.content.Intent
+import android.provider.AlarmClock
 import android.provider.Settings
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -58,8 +62,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -538,6 +548,15 @@ private fun GroupCard(
                 // 会写系统的动作 → 整张卡片淡黄底 + 琥珀边，随配置实时变化。
                 val warn = RulesDisplay.stateWriteWarning(row.spec, row.value)
                 WarningAwareCard(warning = warn) {
+                    // 八期：卡首那条 ⚠ 由这里渲染（卡片只管换色）。展开「了解风险与代价」之后
+                    // 卡片底部已经把代价摊开了 —— 同一条黄警告就不再占一行，免得两处一直拉扯视线。
+                    warn?.takeIf { !expansion.open(row.spec.id, RulesSection.DETAIL) }?.let { line ->
+                        StateWriteWarningNotice(
+                            text = line,
+                            // 未内置的自定义动作名用等宽高亮，一眼看出说的是哪一条。
+                            highlight = RulesDisplay.customActionNames(row.spec, row.value),
+                        )
+                    }
                     SettingRowItem(
                         row = row,
                         expansion = expansion,
@@ -571,10 +590,8 @@ private fun WarningAwareCard(
     if (warning == null) {
         PilotCard { content() }
     } else {
-        PilotCard(container = warningCardContainer(), border = warningCardBorder()) {
-            StateWriteWarningNotice(warning)
-            content()
-        }
+        // 八期：换色这件事只看 warning（与一期逐字一致）；卡首那句话由调用点自己摆。
+        PilotCard(container = warningCardContainer(), border = warningCardBorder()) { content() }
     }
 }
 
@@ -604,15 +621,39 @@ private fun warningInk(): Color =
     if (isSystemInDarkTheme()) Color(0xFFF0D9A0) else Color(0xFF6B4E00)
 
 @Composable
-private fun StateWriteWarningNotice(text: String) {
+private fun StateWriteWarningNotice(text: String, highlight: List<String> = emptyList()) {
     val ink = warningInk()
+    val body = remember(text, highlight) {
+        if (highlight.isEmpty()) {
+            AnnotatedString(text)
+        } else {
+            buildAnnotatedString {
+                var rest = text
+                while (rest.isNotEmpty()) {
+                    // 把动作名从整句里摘出来单独上样式：名字是用户自己填的，等宽最好认。
+                    val at = highlight.mapNotNull { name ->
+                        rest.indexOf(name).takeIf { it >= 0 }?.let { it to name }
+                    }.minByOrNull { it.first }
+                    if (at == null) {
+                        append(rest)
+                        break
+                    }
+                    append(rest.substring(0, at.first))
+                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)) {
+                        append(at.second)
+                    }
+                    rest = rest.substring(at.first + at.second.length)
+                }
+            }
+        }
+    }
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
         verticalAlignment = Alignment.Top,
     ) {
         Text("⚠ ", color = ink, style = MaterialTheme.typography.bodyMedium)
         Text(
-            text = text,
+            text = body,
             color = ink,
             style = MaterialTheme.typography.bodySmall,
             lineHeight = 19.sp,
@@ -1009,7 +1050,8 @@ private fun SettingRowItem(
     // 点开的仍是二期那颗自绘遮罩层（三步演绎 + preview 原文 + 满意 / 再改改），零执行通路。
     DashedActionButton(
         onClick = { simulateOpen = true },
-        icon = "▶",
+        icon = "⚡",
+        tint = testInk(),
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
     ) { Text("模拟运行一次") }
 
@@ -2026,6 +2068,9 @@ private fun ScreenOnlyTagControl(
     var legendOpen by remember { mutableStateOf(false) }
     var explainOpen by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf<String?>(null) }
+    // 八期：删除先弹一次确认；自定义标签默认只摆前 3 条，多的收进「更多 ▾」。
+    var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var customExpanded by remember { mutableStateOf(false) }
     val unknown = items.filter { raw -> raw.isNotBlank() && RulesDisplay.SCREEN_ONLY_TAGS.none { it.first == raw } }
     val lines = items
 
@@ -2153,7 +2198,17 @@ private fun ScreenOnlyTagControl(
                         onLongClick = { hint = RulesDisplay.tagHint(raw, label) },
                     )
                 }
+                // 八期：自定义动作也做成橙色胶囊，与内置标签**摆在同一组里**（不再另起一段白底黑字）。
+                CustomChips(
+                    unknown = unknown,
+                    expanded = customExpanded,
+                    onToggleExpand = { customExpanded = !customExpanded },
+                    onEdit = { editing = it },
+                    onDelete = { pendingDelete = it },
+                    onHint = { hint = RulesDisplay.CUSTOM_MIX_NOTE },
+                )
             }
+            CustomChipsNotes(mode = mode, unknown = unknown)
             // 三期：原来那颗「详细说明 ▾」三级折叠整段收进标题行的 (i) 弹层
             // （与单选/标签的解释本就有重复，用户要求去重）—— 长文一个字没删，见
             // RulesDisplay.TAG_LIST_HELP，渲染在 StrategyExplainDialog 里。
@@ -2164,26 +2219,26 @@ private fun ScreenOnlyTagControl(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-
-        // 清单里不认识的条目：原样显示（不认识就不翻译），每一条都能单独改 / 删。
-        if (unknown.isNotEmpty()) {
-            Text(
-                text = "清单里还有这些名字（不认识，原样显示）：",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 10.dp),
-            )
-            unknown.forEach { raw ->
-                // 内置 8 条动作里没进那 6 个标签的（alarm.set / timer.set），名字认得出来：
-                // 括号里给个说法，但原值照样在最前面 —— 写进清单的还是它。
-                val label = RulesDisplay.actionLabel(raw)
-                PilotDivider()
-                EditableItemRow(
-                    text = if (label != raw) "$raw（$label）" else raw,
-                    onEdit = { editing = raw },
-                    onDelete = { onApply(encodeList(items.filter { it != raw }), "已从清单里删除：$raw") },
-                )
+            // 八期：「全部允许」档下清单里仍可能有自定义动作（6 枚标签都在就判全部允许）——
+            // 把它们跟内置标签摆在一起（橙色），并给一句"按策略运行…其中包含自定义动作"。
+            if (unknown.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
+                    // 八期：「全部允许」这一档下内置标签本来就不摆出来；这里只把**清单里多出来的**
+                    // 自定义动作摆出来（橙色），并说清"当前按策略运行…其中包含自定义动作：…"。
+                    CustomChips(
+                        unknown = unknown,
+                        expanded = customExpanded,
+                        onToggleExpand = { customExpanded = !customExpanded },
+                        onEdit = { editing = it },
+                        onDelete = { pendingDelete = it },
+                        onHint = { hint = RulesDisplay.CUSTOM_MIX_NOTE },
+                    )
+                }
+                CustomChipsNotes(mode = mode, unknown = unknown)
             }
         }
 
@@ -2213,6 +2268,17 @@ private fun ScreenOnlyTagControl(
 
     if (legendOpen) {
         TagLegendDialog(onClose = { legendOpen = false })
+    }
+
+    pendingDelete?.let { name ->
+        ConfirmDeleteDialog(
+            name = name,
+            onCancel = { pendingDelete = null },
+            onConfirm = {
+                pendingDelete = null
+                onApply(encodeList(items.filter { it != name }), "已从清单里删除：$name")
+            },
+        )
     }
 
     editing?.let { original ->
@@ -2442,36 +2508,41 @@ private fun AddActionOverlay(
                 onValueChange = { value = it },
                 label = { Text("动作名，例如 alarm.set") },
                 singleLine = true,
-                isError = badShape,
+keyboardOptions = KeyboardOptions(
+                // 七期：动作名/调用代号/动作串都是英文机器串 —— 类型给 Ascii、关掉自动大写与自动纠错。
+                // ⚠ 这只表达"我要英文键位"，最终键位仍由用户装的那套输入法决定，App 强制不了。
+                keyboardType = KeyboardType.Ascii,
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+            ),
+                            isError = badShape,
                 modifier = Modifier.weight(1f, fill = true).focusRequester(focus),
             )
             Box {
                 PilotSmallChip(onClick = { listOpen = true }) { Text("📋 查看可用动作") }
-                // 列表只用来**填入**，点一下就把名字写进输入框，不直接改任何配置。
-                DropdownMenu(expanded = listOpen, onDismissRequest = { listOpen = false }) {
-                    suggestions.distinct().forEach { raw ->
-                        val meaning = RulesDisplay.actionLabel(raw)
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(
-                                        text = raw,
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                                    )
-                                    if (meaning != raw) {
-                                        Text(
-                                            text = meaning,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            },
-                            onClick = {
+                // 列表只用来**填入**：点一下把名字写进输入框并收起，写入仍然只由「加进清单」那颗按钮发起。
+                // 七期：列表可滚动、有最大高度、靠近屏幕底部时朝上弹（见 PilotPickerMenu）。
+                PilotPickerMenu(expanded = listOpen, onDismiss = { listOpen = false }) {
+                    ACTION_NAME_DICTIONARY.forEach { (group, entries) ->
+                        PilotPickerGroupLabel(group)
+                        entries.forEach { entry ->
+                            DictionaryRow(entry) {
+                                value = entry.value
+                                listOpen = false
+                            }
+                        }
+                    }
+                    val extra = suggestions.distinct().filter { raw ->
+                        ACTION_NAME_DICTIONARY.none { group -> group.second.any { it.value == raw } }
+                    }
+                    if (extra.isNotEmpty()) {
+                        PilotPickerGroupLabel("这份清单里已有的")
+                        extra.forEach { raw ->
+                            DictionaryRow(ActionEntry(raw, "清单里已有", "这份清单里已有的条目")) {
                                 value = raw
                                 listOpen = false
-                            },
-                        )
+                            }
+                        }
                     }
                 }
             }
@@ -2503,6 +2574,164 @@ private fun AddActionOverlay(
             style = MaterialTheme.typography.labelSmall,
             color = LocalPilotExtraColors.current.tertiaryText,
             modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+
+
+/**
+ * 八期：自定义动作那几枚**橙色胶囊**（摆在标签组的 FlowRow 里，与内置标签同一组）。
+ * 点=改名字，长按=给一句"这是自定义动作、按有风险处理"，点标签上的 ✕=删（删前确认）。
+ * 默认只摆 [CUSTOM_CHIP_LIMIT] 条，多的收进「更多 ▾」，免得卡片无限变长。
+ */
+@Composable
+private fun CustomChips(
+    unknown: List<String>,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onEdit: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onHint: () -> Unit,
+) {
+    val shown = if (expanded) unknown else unknown.take(CUSTOM_CHIP_LIMIT)
+    shown.forEach { raw ->
+        CustomActionChip(
+            name = raw,
+            onClick = { onEdit(raw) },
+            onLongClick = onHint,
+            onDelete = { onDelete(raw) },
+        )
+    }
+    if (!expanded && unknown.size > CUSTOM_CHIP_LIMIT) {
+        PilotSmallChip(onClick = onToggleExpand) {
+            Text("更多 ${unknown.size - CUSTOM_CHIP_LIMIT} 条 ▾")
+        }
+    }
+}
+
+/**
+ * 八期：橙色那一组的说法 —— 中性、肯定用户的行为，同时把事实说清（不在内置名单里、无法确认只上屏），
+ * 并按当前策略给一句"按策略运行…其中包含自定义动作：…"。没有自定义动作时**一个字都不出**。
+ */
+@Composable
+private fun CustomChipsNotes(mode: RulesDisplay.ScreenOnlyMode, unknown: List<String>) {
+    if (unknown.isEmpty()) return
+    Text(
+        text = RulesDisplay.CUSTOM_ACTIONS_LABEL,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(top = 10.dp),
+    )
+    RulesDisplay.policyLine(mode, unknown)?.let { line ->
+        Text(
+            text = line,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            lineHeight = 19.sp,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+    Text(
+        text = RulesDisplay.CUSTOM_MIX_NOTE,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        lineHeight = 19.sp,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+    Text(
+        text = RulesDisplay.CUSTOM_CHIP_HINT,
+        style = MaterialTheme.typography.labelSmall,
+        color = LocalPilotExtraColors.current.tertiaryText,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+}
+
+/** 自定义标签默认摆几条（八期：避免卡片无限变长）。 */
+private const val CUSTOM_CHIP_LIMIT = 3
+
+/**
+ * 八期：清单里**未内置**的动作做成胶囊标签（橙色），点一下改名字、长按或点标签上的 ✕ 删掉。
+ *
+ * 与内置标签（[TagChip]）同款形状、不同色相：橙色 = 这条不是内置的，名字是用户自己写的。
+ * 长按给的是"这是自定义动作、按有风险处理"的提示，不是模块里的解释（那在卡片警示和 (i) 里）。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun CustomActionChip(
+    name: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val dark = isSystemInDarkTheme()
+    val bg = Color(0xFFFFF8E1).takeIf { !dark } ?: Color(0xFF3A2F12)
+    val line = if (dark) Color(0xFFE5B94E) else Color(0xFFC8901A)
+    val ink = if (dark) Color(0xFFF0D9A0) else Color(0xFF6B4E00)
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = bg,
+        border = BorderStroke(1.dp, line),
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+        ) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace),
+                color = ink,
+                maxLines = 1,
+            )
+            Text(
+                // 小小的 ✕：删除这道口子就在这里（点了先弹一次确认）。
+                text = "✕",
+                style = MaterialTheme.typography.labelMedium,
+                color = ink,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .clickable(onClick = onDelete)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 八期：删除自定义动作的二次确认（居中弹窗，与另外两颗输入弹窗同一套壳）。
+ * 删除是不可逆的，所以**先问一次**；不想删就「继续保留」。
+ */
+@Composable
+private fun ConfirmDeleteDialog(name: String, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    ModalOverlay(
+        onDismiss = onCancel,
+        footer = {
+            TextButton(onClick = onCancel) {
+                Text("继续保留", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            ) { Text("删掉") }
+        },
+    ) {
+        Text(
+            text = "删掉这条自定义动作？",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        Text(
+            text = name,
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        Text(
+            text = "删掉之后助手不会再按它免问；清单里其它条目一个都不动。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -2591,20 +2820,53 @@ private fun ItemTextDialog(
     onSave: (String) -> Unit,
 ) {
     var value by remember(initial) { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { value = it },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+    val focus = remember { FocusRequester() }
+    var askDiscard by remember { mutableStateOf(false) }
+    // 八期：这颗弹窗也搬到居中三段式（与四期/五期同一套壳）—— 同一个班里不许有两种弹窗形态。
+    // 关的时候如果改过东西，先问一次，别让改动无声地没了。
+    val close: () -> Unit = {
+        if (value != initial && value.isNotEmpty()) askDiscard = true else onDismiss()
+    }
+    ModalOverlay(
+        onDismiss = close,
+        footer = {
+            TextButton(onClick = close) {
+                Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Button(onClick = { onSave(value) }, enabled = value.isNotBlank()) { Text("保存这一条") }
         },
-        confirmButton = { TextButton(onClick = { onSave(value) }) { Text("保存这一条") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp),
+        )
+        OutlinedTextField(
+            value = value,
+            onValueChange = { value = it },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii,
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(focus),
+        )
+        LaunchedEffect(Unit) { focus.requestFocus() }
+    }
+    if (askDiscard) {
+        AlertDialog(
+            onDismissRequest = { askDiscard = false },
+            title = { Text("放弃未保存的内容？") },
+            text = { Text("这一条的改动还没保存。") },
+            confirmButton = {
+                TextButton(onClick = { askDiscard = false; onDismiss() }) { Text("放弃") }
+            },
+            dismissButton = { TextButton(onClick = { askDiscard = false }) { Text("继续编辑") } },
+        )
+    }
 }
 
 // ─────────────────────────── 文档型编辑器 ───────────────────────────
@@ -3010,6 +3272,101 @@ private val BUILTIN_PAGE_PRESETS: List<Pair<String, String>> = listOf(
 )
 
 /**
+ * 字典里的一条：**写入值** + 屏幕说法 + 来源。分类只是展示，**不进写入值**。
+ *
+ * [builtin] 只有内置设置页那 8 条才有（= 它的页面键），用来在新增时给一个不冲突的建议调用代号。
+ */
+private data class ActionEntry(
+    val value: String,
+    val label: String,
+    val source: String,
+    val builtin: String? = null,
+)
+
+/**
+ * 「动作名」字段的动作字典（免问清单 / 自定义上屏动作两处共用）。
+ *
+ * **来源只有一个：本项目内置的 8 个模板名**（`IntentTemplates`，逐个引用常量、不抄字符串）。
+ * 动作名是助手调用时用的名字，仓库里能确证的只有这 8 个；凑数的名字一个都不放。
+ * 屏幕说法取显示层 `RulesDisplay.actionLabel`。
+ */
+private val ACTION_NAME_DICTIONARY: List<Pair<String, List<ActionEntry>>> = listOf(
+    "闹钟与计时" to listOf(
+        ActionEntry(IntentTemplates.ALARM_SET, RulesDisplay.actionLabel(IntentTemplates.ALARM_SET), "内置模板 IntentTemplates.ALARM_SET"),
+        ActionEntry(IntentTemplates.TIMER_SET, RulesDisplay.actionLabel(IntentTemplates.TIMER_SET), "内置模板 IntentTemplates.TIMER_SET"),
+        ActionEntry(IntentTemplates.ALARM_SHOW, RulesDisplay.actionLabel(IntentTemplates.ALARM_SHOW), "内置模板 IntentTemplates.ALARM_SHOW"),
+        ActionEntry(IntentTemplates.TIMER_SHOW, RulesDisplay.actionLabel(IntentTemplates.TIMER_SHOW), "内置模板 IntentTemplates.TIMER_SHOW"),
+    ),
+    "应用与信息" to listOf(
+        ActionEntry(IntentTemplates.SETTINGS_OPEN, RulesDisplay.actionLabel(IntentTemplates.SETTINGS_OPEN), "内置模板 IntentTemplates.SETTINGS_OPEN"),
+        ActionEntry(IntentTemplates.APP_INFO, RulesDisplay.actionLabel(IntentTemplates.APP_INFO), "内置模板 IntentTemplates.APP_INFO"),
+    ),
+    "其它" to listOf(
+        ActionEntry(IntentTemplates.DIAL, RulesDisplay.actionLabel(IntentTemplates.DIAL), "内置模板 IntentTemplates.DIAL"),
+        ActionEntry(IntentTemplates.WEB_OPEN, RulesDisplay.actionLabel(IntentTemplates.WEB_OPEN), "内置模板 IntentTemplates.WEB_OPEN"),
+    ),
+)
+
+/**
+ * 「系统动作指令」字段的动作字典。**值全部引用框架常量**
+ * （`android.provider.Settings.*` / `android.provider.AlarmClock.*` / `android.content.Intent.*`），
+ * 与 `DirectBackend.settingsAction(page)` / `buildTemplateIntent(...)` 用的是同一批常量 ——
+ * 不是手抄的字符串，所以既不会与实现漂移，也不存在"编一个 action"的问题。
+ *
+ * "系统设置"那 8 条就是内置设置页；下面三组是内置模板在用的动作串，
+ * 标签里明说了**不是设置页**（填进这一项等于让 settings.open 也去开它，一般用不到）。
+ */
+private val PAGE_ACTION_DICTIONARY: List<Pair<String, List<ActionEntry>>> = listOf(
+    "系统设置" to BUILTIN_PAGE_PRESETS.map { (builtin, action) ->
+        ActionEntry(action, "内置页 $builtin", "Settings 常量 · 内置页 $builtin（同 DirectBackend.settingsAction）", builtin)
+    },
+    "闹钟与计时" to listOf(
+        ActionEntry(AlarmClock.ACTION_SET_ALARM, "内置模板 alarm.set 的动作串（不是设置页）", "AlarmClock 常量 · 同 DirectBackend.buildTemplateIntent"),
+        ActionEntry(AlarmClock.ACTION_SET_TIMER, "内置模板 timer.set 的动作串（不是设置页）", "AlarmClock 常量 · 同 DirectBackend.buildTemplateIntent"),
+        ActionEntry(AlarmClock.ACTION_SHOW_ALARMS, "内置模板 alarm.show 的动作串（不是设置页）", "AlarmClock 常量 · 同 DirectBackend.buildTemplateIntent"),
+        ActionEntry(AlarmClock.ACTION_SHOW_TIMERS, "内置模板 timer.show 的动作串（不是设置页）", "AlarmClock 常量 · 同 DirectBackend.buildTemplateIntent"),
+    ),
+    "应用与信息" to listOf(
+        ActionEntry(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "内置模板 app.info 的动作串（不是设置页）", "Settings 常量 · 同 DirectBackend.buildTemplateIntent"),
+    ),
+    "其它" to listOf(
+        ActionEntry(Intent.ACTION_DIAL, "内置模板 dial 的动作串（不是设置页）", "Intent 常量 · 同 DirectBackend.buildTemplateIntent"),
+        ActionEntry(Intent.ACTION_VIEW, "内置模板 web.open 的动作串（不是设置页）", "Intent 常量 · 同 DirectBackend.buildTemplateIntent"),
+    ),
+)
+
+/** 字典里的一行：屏幕说法 + 写入值（等宽，一眼看出是机器串）+ 来源。点一下只**填入**。 */
+@Composable
+private fun DictionaryRow(entry: ActionEntry, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Column {
+                Text(entry.label, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = entry.value,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "来源：" + entry.source,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalPilotExtraColors.current.tertiaryText,
+                )
+            }
+        },
+        onClick = onClick,
+    )
+}
+
+/**
+ * 「测试」那一类的颜色（七期）：与配置类的主色（绿）分开，配上 ⚡ 一眼能认出"这是试一试，不是改配置"。
+ * 浅色 `#1D4ED8` 压 `#FFFFFF` = 6.70:1、深色 `#7EA8F8` 压 `#2F2F2F` = 5.64:1（都过 WCAG 正文 4.5:1）。
+ */
+@Composable
+private fun testInk(): Color =
+    if (isSystemInDarkTheme()) Color(0xFF7EA8F8) else Color(0xFF1D4ED8)
+
+/**
  * 预设选出来的建议调用代号：内置页那 8 个键在系统里已经被占用（重名会被配置中心拒），
  * 所以给一个**确定不冲突**的建议值，用户可以随手改。
  */
@@ -3043,22 +3400,43 @@ private fun PageFormDialog(
     var value by remember { mutableStateOf(draft) }
     var advanced by remember { mutableStateOf(false) }
     var presetsOpen by remember { mutableStateOf(false) }
+    var detailOpen by remember { mutableStateOf(false) }
+    var askDiscard by remember { mutableStateOf(false) }
+    // 九期：附加参数改成**结构化录入**（键 / 值两列，可加行、可删行）。
+    // 但写进配置的仍是老路径那一串 `键=值`（buildParamLines），形状与校验规则一个字节没动。
+    var paramRows by remember {
+        mutableStateOf(RulesDisplay.parseParamLines(draft.extras))
+    }
     val isNew = draft.originalKey == null
     val key = value.key.trim()
     val action = value.action.trim()
     val keyShapeOk = PAGE_KEY.matches(key)
-    // 后端两条会拒的规则，提前在弹窗里说清：与内置 8 页重名、与已有条目重名（编辑自己那条不算）。
-    val keyTaken = key.isNotEmpty() && (
-        key in IntentTemplates.settingsPages ||
-            (key in takenKeys && key != draft.originalKey)
-        )
+    // 后端两条会拒的规则，提前在弹窗里**输入时就报**：与内置 8 页重名、与已有条目重名（编辑自己那条不算）。
+    val keyIsBuiltin = key.isNotEmpty() && key in IntentTemplates.settingsPages
+    val keyIsDuplicate = key.isNotEmpty() && key in takenKeys && key != draft.originalKey
+    val keyTaken = keyIsBuiltin || keyIsDuplicate
     val actionOk = PAGE_ACTION.matches(action)
     val canSave = keyShapeOk && !keyTaken && actionOk
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    // 九期：有未保存的输入时，关之前先问一次（没输入 / 与打开时一样就直接关，不多问）。
+    val dirty = value != draft
+    val close: () -> Unit = { if (dirty) askDiscard = true else onDismiss() }
+
+    if (askDiscard) {
+        DiscardConfirmOverlay(
+            detail = "这一个设置页的改动还没保存。",
+            onKeepEditing = { askDiscard = false },
+            onDiscard = {
+                askDiscard = false
+                onDismiss()
+            },
+        )
+        return
+    }
 
     ModalOverlay(
-        onDismiss = onDismiss,
+        onDismiss = close,
         footer = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3067,13 +3445,13 @@ private fun PageFormDialog(
             ) {
                 // 「取消」是次要动作：普通文字按钮、次要色，不与主操作抢。
                 TextButton(
-                    onClick = onDismiss,
+                    onClick = close,
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     ),
                 ) { Text("取消") }
                 Spacer(modifier = Modifier.width(8.dp))
-                // 主操作：实心主色按钮；必填项空或非法时禁用变灰。
+                // 主操作：实心主色按钮；必填项空或非法时禁用变灰，两项都合法就亮起来。
                 Button(onClick = { onSave(value) }, enabled = canSave) { Text("保存这一个") }
             }
         },
@@ -3089,13 +3467,13 @@ private fun PageFormDialog(
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
-                    .clickable(onClick = onDismiss)
+                    .clickable(onClick = close)
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             )
         }
-        // 安全提示：这一项填错不是"没生效"，而是会真去点系统。
+        // 安全提示（九期换成人话）：只说"可能出错"，不替用户断言具体会改什么。
         Text(
-            text = "⚠️ 此动作会直接控制系统。填错可能导致助手执行失败或跳出异常窗口。",
+            text = RulesDisplay.PAGE_DANGER_NOTE,
             style = MaterialTheme.typography.bodySmall,
             color = warningInk(),
             modifier = Modifier.padding(top = 8.dp),
@@ -3111,9 +3489,9 @@ private fun PageFormDialog(
                     text = when {
                         key.isNotEmpty() && !keyShapeOk ->
                             "调用代号只能用英文小写字母、数字和下划线，并以小写字母开头。"
-                        keyTaken && key in IntentTemplates.settingsPages ->
-                            "这个调用代号已经被内置页面占用了，重名会被拒。"
-                        keyTaken -> "这个调用代号已经有一条了，重名会被拒。"
+                        // 九期：与内置页重名 / 与已有条目重名各自说自己的话（依据见 RulesDisplay 的注释）。
+                        keyIsBuiltin -> RulesDisplay.PAGE_KEY_BUILTIN_TAKEN
+                        keyIsDuplicate -> RulesDisplay.PAGE_KEY_DUPLICATE
                         else -> "小写英文，助手调用时使用"
                     },
                     style = MaterialTheme.typography.labelSmall,
@@ -3121,6 +3499,13 @@ private fun PageFormDialog(
             },
             isError = key.isNotEmpty() && (keyTaken || !keyShapeOk),
             singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                // 七期：动作名/调用代号/动作串都是英文机器串 —— 类型给 Ascii、关掉自动大写与自动纠错。
+                // ⚠ 这只表达"我要英文键位"，最终键位仍由用户装的那套输入法决定，App 强制不了。
+                keyboardType = KeyboardType.Ascii,
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+            ),
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp).focusRequester(focus),
         )
         OutlinedTextField(
@@ -3139,41 +3524,49 @@ private fun PageFormDialog(
             },
             isError = action.isNotEmpty() && !actionOk,
             singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii,
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+            ),
             modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
         )
 
-        // ── 预设：只把"确证过"的 8 个内置页动作串摆出来，点一次填好两项 ──
-        Box(modifier = Modifier.padding(top = 8.dp)) {
-            PilotSmallChip(onClick = { presetsOpen = true }) { Text("📋 常用设置页") }
-            DropdownMenu(expanded = presetsOpen, onDismissRequest = { presetsOpen = false }) {
-                BUILTIN_PAGE_PRESETS.forEach { (builtin, action) ->
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("内置页 $builtin", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    text = action,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        },
-                        onClick = {
-                            presetsOpen = false
-                            // 编辑时不动调用代号（那是这一条的身份）；新增时给一个不冲突的建议值。
-                            value = value.copy(
-                                key = if (isNew) suggestPageKey(builtin, takenKeys) else value.key,
-                                action = action,
-                            )
-                        },
-                    )
+        // ── 预设：只把"确证过"的动作串摆出来，点一次填好两项 ──
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(top = 8.dp),
+        ) {
+            PilotSmallChip(onClick = { presetsOpen = true }) { Text("📋 动作字典") }
+            Text(
+                // 九期：技术细节（来源、与实现同源、上限）挪进这颗 (i)。
+                text = " (i)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clickable { detailOpen = true }
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+            )
+        }
+        PilotPickerMenu(expanded = presetsOpen, onDismiss = { presetsOpen = false }) {
+            PAGE_ACTION_DICTIONARY.forEach { (group, entries) ->
+                PilotPickerGroupLabel(group)
+                entries.forEach { entry ->
+                    DictionaryRow(entry) {
+                        presetsOpen = false
+                        // 编辑时不动调用代号（那是这一条的身份）；新增且这条预设自带页面键时给一个不冲突的建议值。
+                        val builtin = entry.builtin
+                        value = value.copy(
+                            key = if (isNew && builtin != null) suggestPageKey(builtin, takenKeys) else value.key,
+                            action = entry.value,
+                        )
+                    }
                 }
             }
         }
         Text(
-            text = "预设的动作串就是内置这 8 个设置页在用的那一串（与实现同一批系统常量）；" +
-                "别的页面必须自己从系统里抄，助手不会替你猜。" +
-                if (isNew) "调用代号默认填一个不与内置页冲突的名，可以改。" else "编辑时不会动你的调用代号。",
+            // 九期：正文只留两句话（原来那一大段技术说明进 (i)）。
+            text = RulesDisplay.PAGE_PRESET_SHORT,
             style = MaterialTheme.typography.labelSmall,
             color = LocalPilotExtraColors.current.tertiaryText,
             modifier = Modifier.padding(top = 6.dp),
@@ -3201,21 +3594,182 @@ private fun PageFormDialog(
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 8.dp),
             )
-            OutlinedTextField(
-                value = value.extras,
-                onValueChange = { value = value.copy(extras = it) },
-                placeholder = { Text("键=值，一行一条") },
-                supportingText = {
+            paramRows.forEachIndexed { index, row ->
+                if (row.raw != null) {
+                    // 没有「=」的行：助手不读它，但原样留着、不丢（想删就点 ✕）。
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) {
+                        Text(
+                            text = row.raw,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "✕",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clickable {
+                                    val next = paramRows.toMutableList().also { it.removeAt(index) }
+                                    paramRows = next
+                                    value = value.copy(extras = RulesDisplay.buildParamLines(next))
+                                }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
                     Text(
-                        text = "键名只能是字母/数字/下划线/点；值的形状决定类型：" +
-                            "true/false 当开关、整数当数字、其余当文本。最多 16 条。",
+                        text = RulesDisplay.PAGE_EXTRA_NO_EQUALS,
                         style = MaterialTheme.typography.labelSmall,
+                        color = warningInk(),
+                        modifier = Modifier.padding(top = 2.dp),
                     )
-                },
-                singleLine = false,
-                modifier = Modifier.fillMaxWidth().height(96.dp),
-            )
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = row.key,
+                            onValueChange = { text ->
+                                val next = paramRows.toMutableList()
+                                next[index] = row.copy(key = text)
+                                paramRows = next
+                                value = value.copy(extras = RulesDisplay.buildParamLines(next))
+                            },
+                            placeholder = { Text("键") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Ascii,
+                                capitalization = KeyboardCapitalization.None,
+                                autoCorrect = false,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        OutlinedTextField(
+                            value = row.value,
+                            onValueChange = { text ->
+                                val next = paramRows.toMutableList()
+                                next[index] = row.copy(value = text)
+                                paramRows = next
+                                value = value.copy(extras = RulesDisplay.buildParamLines(next))
+                            },
+                            placeholder = { Text("值") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "✕",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clickable {
+                                    val next = paramRows.toMutableList().also { it.removeAt(index) }
+                                    paramRows = next
+                                    value = value.copy(extras = RulesDisplay.buildParamLines(next))
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+            val usedRows = paramRows.count { it.raw == null && it.key.isNotBlank() }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 6.dp),
+            ) {
+                PilotSmallChip(onClick = {
+                    val next = paramRows + RulesDisplay.ParamLine(key = "", value = "")
+                    paramRows = next
+                }) { Text("+ 添加参数") }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (usedRows >= RulesDisplay.PAGE_EXTRA_LIMIT) {
+                        "最多 ${RulesDisplay.PAGE_EXTRA_LIMIT} 条，已经满了。"
+                    } else {
+                        "写进配置的仍是「键=值」，每行一条；值的形状决定类型" +
+                            "（true/false 当开关、整数当数字、其余当文本）。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (usedRows >= RulesDisplay.PAGE_EXTRA_LIMIT) {
+                        warningInk()
+                    } else {
+                        LocalPilotExtraColors.current.tertiaryText
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
+    }
+
+    if (detailOpen) {
+        StrategyDetailOverlay(
+            title = "动作字典与附加参数",
+            body = RulesDisplay.PAGE_PRESET_DETAIL,
+            onClose = { detailOpen = false },
+        )
+    }
+}
+
+/**
+ * 九期：有未保存内容时的二次确认。用的是**同一个弹窗壳**（不再叠第二层 Dialog），
+ * 两条回执：「继续编辑」留住输入、「放弃」才真的关掉。
+ */
+@Composable
+private fun DiscardConfirmOverlay(
+    detail: String,
+    onKeepEditing: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    ModalOverlay(
+        onDismiss = onKeepEditing,
+        footer = {
+            TextButton(
+                onClick = onKeepEditing,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ),
+            ) { Text("继续编辑") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = onDiscard) { Text("放弃") }
+        },
+    ) {
+        Text(
+            text = "放弃未保存的内容？",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        Text(
+            text = detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 九期：纯说明弹层（标题 + 一段原文），与策略 (i)、简写对照同一套壳。 */
+@Composable
+private fun StrategyDetailOverlay(title: String, body: String, onClose: () -> Unit) {
+    ModalOverlay(
+        onDismiss = onClose,
+        footer = {
+            TextButton(onClick = onClose) { Text("知道了") }
+        },
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        Text(
+            text = body,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            lineHeight = 20.sp,
+        )
     }
 }
 
