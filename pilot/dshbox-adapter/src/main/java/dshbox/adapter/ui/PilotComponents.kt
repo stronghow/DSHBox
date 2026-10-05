@@ -138,14 +138,23 @@ fun PilotGroupLabel(text: String) {
     )
 }
 
-/** 无标题的描边卡片：一条能力一张卡，卡内不再画分隔线。 */
+/**
+ * 无标题的描边卡片：一条能力一张卡，卡内不再画分隔线。
+ *
+ * [container] 与 [border] 是给"这张卡里有警示"用的（规则页在有会写系统的动作时把整张卡
+ * 染成淡黄底 + 琥珀边）。缺省值与从前逐字一致：不传 = 与宿主同款的 surface + outlineVariant。
+ */
 @Composable
-fun PilotCard(content: @Composable ColumnScope.() -> Unit) {
+fun PilotCard(
+    container: Color = MaterialTheme.colorScheme.surface,
+    border: BorderStroke = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = container,
+        border = border,
     ) {
         Column(modifier = Modifier.padding(horizontal = CARD_PADDING, vertical = 4.dp), content = content)
     }

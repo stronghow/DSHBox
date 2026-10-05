@@ -1,20 +1,27 @@
 package dshbox.adapter.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -24,6 +31,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -47,6 +55,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import interlock.relay.core.protocol.CapabilityDescriptor
 import interlock.relay.core.protocol.TierCeiling
 import interlock.relay.core.runtime.RelayContainer
@@ -62,25 +72,34 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 一项配置里两块可展开内容的编号。两块互不牵连：展开「了解风险与代价」不会铺开控件，
- * 展开「改这一项」也不会带出说明。
+ * 一项配置里可展开内容的编号。各块互不牵连：展开哪一块都不会带出另外两块。
  *
  * 说明（原来分「改了会怎样」与「看例子」两颗）合并成 DETAIL 一颗：要求是**严格分层** ——
- * 折叠态只留"标题 + 一句话 + 当前值"，其余（改了会怎样 / 为什么默认这样 / 代价 / 影响范围 /
- * 只读说明 / 例子）全在一处，点开一次就都能读到，不必先猜哪颗开关里有自己要找的那段。
+ * 折叠态只留"标题 + 一句话 + 当前值"。
+ *
+ * 二期再分一层（用户抱怨二级长文挤占视线、把下方的标签顶下去）：
+ * - [DETAIL]   二级：只留**精简版**「改了会怎样」与「代价」（＋只读说明）；
+ * - [DEV_NOTE] 三级：在 DETAIL 里再折一次，装完整原文 / 为什么默认这样 / 影响范围 ——
+ *   偏开发者的内容退到这一层，**一个字都没删**；
+ * - [LIST_HELP] 三级（清单型那一项专用）：标签控件的详细说明，同样是折叠的；
+ * - [EDITOR]   编辑控件。
+ *
+ * 四级状态全部由 [RulesExpansionMemory] 记住：切到子页再回来，手风琴该开着的还开着。
  */
-enum class RulesSection { DETAIL, EDITOR }
+enum class RulesSection { DETAIL, DEV_NOTE, LIST_HELP, EDITOR }
 
 /**
- * 规则页的展开记忆：哪些组打开着、每一项的两块内容各自是否展开、危险组的"先看一眼代价"确认过没有。
+ * 规则页的展开记忆：哪些组打开着、每一项的几块内容各自是否展开、危险组的"先看一眼代价"确认过没有、
+ * 免问清单那一项是不是正处在"自定义挑选"状态。
  *
  * 与 [PilotScreen] 里记住每页滚动位置的 `scrollByPage` 同一个理由：切到别的页时这一页整个从组合里
  * 摘掉，写在页内的 `remember` 活不过一次切页。把记忆交给外层 `remember`，滚动位置与展开状态就一起
- * 活到离开这一页为止。默认：只有常用组打开；每一项两块全收起 —— 第一眼只看到"这项管什么 + 当前值"。
+ * 活到离开这一页为止。默认：只有常用组打开；每一项各块全收起 —— 第一眼只看到"这项管什么 + 当前值"。
  */
 class RulesExpansionMemory {
     private val groups = mutableStateMapOf<RelaySettings.Group, Boolean>()
     private val sections = mutableStateMapOf<String, Boolean>()
+    private val customPicking = mutableStateMapOf<String, Boolean>()
 
     /** 危险组展开前的"先看一眼代价"是否已经确认。 */
     var dangerUnlocked by mutableStateOf(false)
@@ -92,11 +111,29 @@ class RulesExpansionMemory {
         groups[group] = open
     }
 
+    /** 默认收起：没记过就是 false —— 手风琴的默认态只由这一句决定。 */
     fun open(specId: String, section: RulesSection): Boolean =
         sections[sectionKey(specId, section)] == true
 
     fun toggle(specId: String, section: RulesSection) {
         sections[sectionKey(specId, section)] = !open(specId, section)
+    }
+
+    /** 明确地摊开某一块（「再改改」把编辑区直接推到用户面前时用）。 */
+    fun setOpen(specId: String, section: RulesSection, open: Boolean) {
+        sections[sectionKey(specId, section)] = open
+    }
+
+    /**
+     * 免问清单那一项是否正处在"自定义挑选"状态。
+     *
+     * 「自定义允许」不是一个存储值（存储键与写入语义一个都没加），它只是"把标签组露出来"这个
+     * 界面状态；一旦用户点了别的模式、或点了「全选 / 全不选」，这个状态就退回"由现值反推"。
+     */
+    fun customPicking(specId: String): Boolean = customPicking[specId] == true
+
+    fun setCustomPicking(specId: String, on: Boolean) {
+        customPicking[specId] = on
     }
 
     private fun sectionKey(specId: String, section: RulesSection): String = "$specId#${section.name}"
@@ -135,17 +172,22 @@ class RulesEditMemory {
 /**
  * "规则与配置"页：整张页面由 [RelaySettings.all] 那张声明表渲染，不写死任何一项。
  *
- * 呈现纪律（这一版按 UX 评审重排）：
+ * 呈现纪律（一期按 UX 评审重排，二期按用户第二轮反馈再收一层）：
  * - **人话标题层**：主标题取 [RulesDisplay.title]（id → 人话的展示映射），源代码 id 不再当标题；
  *   真名与存储键放在长按标题 / 「了解风险与代价 → 高级」里，作为可查信息保留。
- * - **严格分层**：折叠态只有"风险点 + 人话标题 + 一句话 + 当前状态"；「了解风险与代价」一颗收全
- *   改了会怎样 / 为什么默认这样 / 代价 / 影响范围 / 只读说明，外加「模拟运行一次」。
+ * - **严格分层（二期再收一层）**：折叠态还是"风险胶囊 + 人话标题 + 一句话 + 当前状态"；
+ *   「了解风险与代价」展开后只有**精简版**「改了会怎样」＋「代价」；完整原文 / 为什么默认这样 /
+ *   影响范围 收在里面的「开发者说明 ▾」二级折叠里。**一个字都没删，只是再深一层。**
  * - **一卡一项**：一个分组下每个配置各成一张卡（`approval.screen_only_templates` 与
  *   `intent.settings_pages` 因此天然是两张独立的大卡），危险组默认折叠、展开前先看一屏代价。
+ * - **策略模式**：免问清单那一项顶上先给三选一（全部询问 / 全部允许 / 自定义允许），
+ *   写入语义见 [RulesDisplay.ScreenOnlyMode]；只有选"自定义"才露出下面那组短标签。
  * - **即改即生效**：开关 / 单选 / 数字一改就写；短文本与清单保留显式保存，且有"未保存"提示条。
- * - **风险可视化**：低=绿 ● / 中=黄 ● / 高=红 ●（严重=深红），点旁边的 (i) 看具体后果。
+ * - **风险可视化**：低=绿 / 中=黄 / 高=红 / 严重=深红，都是一枚带色块的小胶囊，点旁边的 (i) 看后果原文；
+ *   卡片里出现"会写系统的动作"时，整张卡片实时染成淡黄底 + 琥珀边。
  *
  * 这一页不滚动：外层 [PilotScreen] 的 Column 已经带 verticalScroll，这里再套一层同轴滚动会在运行时崩。
+ * 二期的「模拟运行一次」遮罩层与「新增自定义动作」底部抽屉走各自的 `Dialog` 窗口，不受这一条约束。
  */
 @Composable
 fun RulesPage(
@@ -308,6 +350,7 @@ fun RulesPage(
                     receipt = error?.let { "没改成：$it" } ?: phrase
                     if (error == null) flashId = id
                 },
+                onNotice = { receipt = it },
                 onReset = { id ->
                     val changed = viewModel.resetSetting(id)
                     edit.clear(id)
@@ -422,6 +465,7 @@ private fun GroupCard(
     onToggle: () -> Unit,
     onResetGroup: () -> Unit,
     onApply: (String, String, String) -> Unit,
+    onNotice: (String) -> Unit,
     onReset: (String) -> Unit,
     onOpenLink: (PilotDestination) -> Unit,
     captionRows: List<RelayContainer.CapabilityRow>,
@@ -430,6 +474,9 @@ private fun GroupCard(
     confirmMode: String,
     flashId: String?,
 ) {
+    // 「这一组恢复默认」一次能改多少项：按钮上直接写出来，不让人猜它动了什么。
+    val groupSpecCount = RelaySettings.all.count { it.group == group }
+    var moreOpen by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             text = group.label + groupChangedSuffix(rows),
@@ -443,20 +490,43 @@ private fun GroupCard(
             color = LocalPilotExtraColors.current.tertiaryText,
             modifier = Modifier.padding(start = 4.dp),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton(onClick = onToggle) { Text(if (expanded) "收起这一组" else "展开这一组") }
-            TextButton(onClick = onResetGroup) { Text("这一组恢复默认") }
+            // ── 二期：两处「恢复默认」不再同时占版面 ──
+            // 「这一组恢复默认」是"一次改好几项"的重手动作，收进「更多」；静止时每个作用域
+            // 只看得见一处「恢复默认」—— 项内那一处（它只在你已经改过、并且正看着这一项时出现）。
+            // 组的作用域恰好只有 1 项时不再给这个入口：那一项自己的「恢复默认」与它逐字等价。
+            if (groupSpecCount > 1) {
+                Box {
+                    TextButton(onClick = { moreOpen = true }) { Text("更多 ⋮") }
+                    DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("这一组恢复默认（$groupSpecCount 项）") },
+                            onClick = {
+                                moreOpen = false
+                                onResetGroup()
+                            },
+                        )
+                    }
+                }
+            }
         }
         if (expanded) {
             // 一卡一项：每一项各自一张卡（这也是"卡片化拆分"的落点：
             // `approval.screen_only_templates` 与 `intent.settings_pages` 因此是两张独立的大卡）。
             rows.forEach { row ->
-                PilotCard {
+                // 会写系统的动作 → 整张卡片淡黄底 + 琥珀边，随配置实时变化。
+                val warn = RulesDisplay.stateWriteWarning(row.spec, row.value)
+                WarningAwareCard(warning = warn) {
                     SettingRowItem(
                         row = row,
                         expansion = expansion,
                         edit = edit,
                         onApply = onApply,
+                        onNotice = onNotice,
                         onReset = onReset,
                         onOpenLink = onOpenLink,
                         captionRows = captionRows,
@@ -468,6 +538,59 @@ private fun GroupCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * 一张配置卡：没有警示时就是默认那张卡（与一期逐字一致），有警示时整张染成淡黄底 + 琥珀边，
+ * 卡首多一条 ⚠ 说明。只在 [RulesDisplay.stateWriteWarning] 给出说法时换色 —— 判定在显示层，
+ * 这里不做任何判断。
+ */
+@Composable
+private fun WarningAwareCard(
+    warning: String?,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (warning == null) {
+        PilotCard { content() }
+    } else {
+        PilotCard(container = warningCardContainer(), border = warningCardBorder()) {
+            StateWriteWarningNotice(warning)
+            content()
+        }
+    }
+}
+
+/** 警示卡的底色：浅色=淡黄，深色=暗琥珀。文字色见 [StateWriteWarningNotice]。 */
+@Composable
+private fun warningCardContainer(): Color =
+    if (isSystemInDarkTheme()) Color(0xFF3A2F12) else Color(0xFFFFF8E1)
+
+/** 警示卡的描边：比普通卡粗半档、颜色固定（不跟主色走），四档风险里只有"会写系统"才用它。 */
+@Composable
+private fun warningCardBorder(): BorderStroke =
+    BorderStroke(1.5.dp, if (isSystemInDarkTheme()) Color(0xFFE5B94E) else Color(0xFFC8901A))
+
+/**
+ * 卡片级警示条：这张卡里的配置会引入"会写系统的动作"时，卡首出现这一条。
+ *
+ * 颜色固定：浅色下 #6B4E00 压 #FFF8E1（≈7.8:1），深色下 #F0D9A0 压 #3A2F12（≈9:1），
+ * 两套都过 WCAG 正文对比度。**不跟主题色走**：它说的是同一件事 —— 你现在放行的动作会直接改设备状态。
+ */
+@Composable
+private fun StateWriteWarningNotice(text: String) {
+    val ink = if (isSystemInDarkTheme()) Color(0xFFF0D9A0) else Color(0xFF6B4E00)
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text("⚠ ", color = ink, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = text,
+            color = ink,
+            style = MaterialTheme.typography.bodySmall,
+            lineHeight = 19.sp,
+        )
     }
 }
 
@@ -498,10 +621,10 @@ private fun findSettingRow(rows: List<RelayContainer.SettingRow>, id: String): R
 // ─────────────────────────── 一行配置 ───────────────────────────
 
 /**
- * 一项配置的卡片正文。折叠态只有"风险点 + 人话标题 + 一句话作用 + 当前状态"，两块长内容各自按需展开。
+ * 一项配置的卡片正文。折叠态只有"风险胶囊 + 人话标题 + 一句话作用 + 当前状态"，长内容按需展开。
  *
- * - 「了解风险与代价」一次收全 effect / whyDefault / 代价（riskText）/ 影响范围 / 只读说明，
- *   外加「模拟运行一次」（只弹预览，不执行任何动作）；
+ * - 「了解风险与代价」里只留精简版「改了会怎样」与「代价」，还有一颗「开发者说明 ▾」二级折叠
+ *   （完整原文 / 为什么默认这样 / 影响范围），外加「模拟运行一次」；
  * - 「改这一项」放控件与「恢复默认」，危险项的子名单跟着它出现。
  *
  * 需要显式保存的控件（短文本 / 清单）把草稿写进 [RulesEditMemory]；开关 / 单选 / 数字直接落盘。
@@ -509,6 +632,8 @@ private fun findSettingRow(rows: List<RelayContainer.SettingRow>, id: String): R
  * [onApply] / [onReset] 收的是**带 id 的原始回调**，本函数在下面按 `spec.id` 绑成
  * [applySelf] / [resetSelf] 供本行自己的控件用；递归渲染子项时继续往下传原始回调，
  * 于是每一层绑的都是**它自己**的 id —— 危险项的子规则因此写进自己的键。
+ *
+ * [onNotice] 只出一条回执（例如「模拟运行一次」看完点"满意"），**不写任何配置**。
  */
 @Composable
 private fun SettingRowItem(
@@ -516,6 +641,7 @@ private fun SettingRowItem(
     expansion: RulesExpansionMemory,
     edit: RulesEditMemory,
     onApply: (String, String, String) -> Unit,
+    onNotice: (String) -> Unit,
     onReset: (String) -> Unit,
     onOpenLink: (PilotDestination) -> Unit,
     captionRows: List<RelayContainer.CapabilityRow>,
@@ -545,13 +671,13 @@ private fun SettingRowItem(
     // 醒目的黄色说明，不能让用户以为"我改了但程序没反应"。
     if (!spec.wired) UnwiredNotice()
 
-    // ── 折叠态：风险点 + 人话标题同行（徽标不进正文），下面是一句话作用与当前值 ──
+    // ── 折叠态：人话标题 + 风险胶囊（色块 + 文字）同行（徽标不进正文），下面是一句话作用与当前值 ──
+    // 二期把"风险点 + 单色文字"换成**一枚小胶囊**：中风险就是黄色的那一枚，四档各一色、
+    // 浅色/深色各一套（颜色见 [riskColors]）。具体后果仍在旁边的 (i) 里。
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
-        verticalAlignment = Alignment.Top,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        PilotStatusDot(color = risk.dot)
-        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = RulesDisplay.title(spec),
             style = MaterialTheme.typography.bodyLarge,
@@ -563,11 +689,7 @@ private fun SettingRowItem(
                 },
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = riskLevelLabel(spec),
-            style = MaterialTheme.typography.labelMedium,
-            color = risk.text,
-        )
+        RiskPill(spec)
         Text(
             text = " (i)",
             style = MaterialTheme.typography.labelMedium,
@@ -660,11 +782,36 @@ private fun SettingRowItem(
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            DetailBlock("改了会怎样", spec.effect)
-            DetailBlock("为什么默认这样", spec.whyDefault)
+            // ── 二级：只有精简版的两段（改了会怎样 / 代价）＋只读说明 ──
+            // 精简版是原文开头的完整句子，不裁半句；短了才提一句"完整原文在下面"。
+            DetailBlock("改了会怎样", RulesDisplay.effectShort(spec))
+            if (RulesDisplay.effectShortened(spec)) {
+                Text(
+                    text = "（完整原文在下面的「开发者说明」里，一个字没删。）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalPilotExtraColors.current.tertiaryText,
+                )
+            }
             DetailBlock("代价", "${spec.risk.label}风险 —— ${spec.riskText}")
-            DetailBlock("影响范围", spec.scope)
             row.readOnlyNote?.let { DetailBlock("说明", it) }
+
+            // ── 三级：偏开发者的三段落再折一层（默认收起）──
+            SectionToggle(
+                label = "开发者说明",
+                open = expansion.open(spec.id, RulesSection.DEV_NOTE),
+                modifier = Modifier.fillMaxWidth(),
+            ) { expansion.toggle(spec.id, RulesSection.DEV_NOTE) }
+            if (expansion.open(spec.id, RulesSection.DEV_NOTE)) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    DetailBlock("改了会怎样", spec.effect)
+                    DetailBlock("为什么默认这样", spec.whyDefault)
+                    DetailBlock("影响范围", spec.scope)
+                }
+            }
+
             TextButton(onClick = { simulateOpen = true }) { Text("模拟运行一次") }
             TextButton(onClick = { advancedShown = !advancedShown }) {
                 Text(if (advancedShown) "收起高级信息" else "高级：标识符与默认值")
@@ -728,7 +875,13 @@ private fun SettingRowItem(
                 }
 
                 is RelaySettings.Type.TextList -> {
-                    ListControl(spec = spec, current = row.value, onApply = applySelf, edit = edit)
+                    ListControl(
+                        spec = spec,
+                        current = row.value,
+                        onApply = applySelf,
+                        edit = edit,
+                        expansion = expansion,
+                    )
                 }
 
                 is RelaySettings.Type.Document -> when (type.kind) {
@@ -770,6 +923,7 @@ private fun SettingRowItem(
                         expansion = expansion,
                         edit = edit,
                         onApply = onApply,
+                        onNotice = onNotice,
                         onReset = onReset,
                         onOpenLink = onOpenLink,
                         captionRows = captionRows,
@@ -800,7 +954,20 @@ private fun SettingRowItem(
     }
 
     if (simulateOpen) {
-        SimulateDialog(spec = spec, onClose = { simulateOpen = false })
+        SimulateDialog(
+            spec = spec,
+            currentRaw = row.value,
+            currentDisplay = valueSummary(row),
+            onSatisfied = {
+                simulateOpen = false
+                onNotice("好，就按这个来。这一项没有任何改动，刚才那一屏也没有执行任何系统动作。")
+            },
+            onAdjust = {
+                simulateOpen = false
+                // 「再改改」＝把这一项的控件直接推到面前（手风琴记忆里也记成"开着"）。
+                expansion.setOpen(spec.id, RulesSection.EDITOR, true)
+            },
+        )
     }
 }
 
@@ -891,18 +1058,16 @@ private fun DetailBlock(label: String, text: String) {
 /** 风险 (i) 弹窗：只说这一项的具体后果（原文 [RelaySettings.Spec.riskText]），不新编事实。 */
 @Composable
 private fun RiskExplainDialog(spec: RelaySettings.Spec, onClose: () -> Unit) {
-    val risk = riskColors(spec)
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("${RulesDisplay.title(spec)}：${riskLevelLabel(spec)}") },
         text = {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    PilotStatusDot(color = risk.dot)
+                    RiskPill(spec)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "风险等级：${riskLevelLabel(spec)}",
-                        color = risk.text,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -922,27 +1087,179 @@ private fun RiskExplainDialog(spec: RelaySettings.Spec, onClose: () -> Unit) {
 }
 
 /**
- * 「模拟运行一次」：只把 schema 里的 [RelaySettings.Spec.preview] 原文摆出来，**不执行任何系统动作**。
- * 真正的沙盒演示（真跑一遍这条配置、把实际效果回放给你看）留到二期，见随本次改动提交的报告。
+ * 「模拟运行一次」遮罩层（二期升级：**不是**普通对话框那张小卡）。
+ *
+ * 三层结构：
+ * 1. 一句声明 —— "这不会改变任何设置，也不会去执行任何系统动作"；
+ * 2. 演示 —— 第 1 步什么时候会轮到这一项（`spec.scope`）、第 2 步按你**此刻**的配置判据怎么走，
+ *    然后用一段带框的正文摆出 `spec.preview` 原文（"今后会这样发生"）；
+ * 3. 问一句「这就是它以后的行为，是否满意？」＋「满意 / 再改改」两个出口。
+ *
+ * **一整屏里没有任何执行通路**：不 startActivity、不发 Intent、不碰 sys.shell、不调设备侧能力。
+ * 真正的沙盒演示（在可信虚拟屏上真跑一遍再回放）留到三期，方案与前置条件见随本次改动提交的报告。
  */
 @Composable
-private fun SimulateDialog(spec: RelaySettings.Spec, onClose: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onClose,
-        title = { Text("模拟运行一次：「${RulesDisplay.title(spec)}」") },
-        text = {
-            Column {
+private fun SimulateDialog(
+    spec: RelaySettings.Spec,
+    currentRaw: String,
+    currentDisplay: String,
+    onSatisfied: () -> Unit,
+    onAdjust: () -> Unit,
+) {
+    val steps = RulesDisplay.simulateContext(spec, currentRaw, currentDisplay)
+    ModalOverlay(onDismiss = onAdjust) {
+        Text(
+            text = "模拟运行一次",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = RulesDisplay.title(spec),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Text(
+            text = "下面只是把「以后会这样发生」演绎一遍：这不会改变任何设置，也不会去执行任何系统动作，" +
+                "更不会碰你的屏幕。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+
+        Text(
+            text = "演示",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 14.dp),
+        )
+        steps.forEachIndexed { index, step ->
+            SimStep(
+                head = step.first,
+                body = step.second,
+                last = index == steps.lastIndex,
+            )
+        }
+        // 第 3 步：schema 的 preview 原文（一期那张弹窗的正文），这里摆进一个框里。
+        Text(
+            text = "第 3 步 · 接下来会发生什么",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 14.dp),
+        )
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        ) {
+            Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                 Text(spec.preview)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "这不会改变任何设置，也不会去执行任何系统动作 —— 这一版只把「改了之后会发生什么」讲给你听。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            }
+        }
+
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+        ) {
+            Text(
+                text = "这就是它以后的行为，是否满意？",
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(onClick = onSatisfied) { Text("满意，就这样") }
+            TextButton(onClick = onAdjust) { Text("再改改") }
+        }
+    }
+}
+
+/**
+ * 遮罩层容器（二期新增）：`Dialog` + `usePlatformDefaultWidth = false` —— 铺满整屏、由我们自己画
+ * 遮罩与内容，与"普通对话框"（系统默认宽度那张小卡）不是一回事。点遮罩 = 关掉（什么都不改）。
+ *
+ * 内容区用 `verticalScroll` 兜住长内容：遮罩层自己那个窗口不参与页面的滚动。
+ */
+@Composable
+private fun ModalOverlay(
+    onDismiss: () -> Unit,
+    align: Alignment = Alignment.Center,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.62f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = align,
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 24.dp)
+                    // 点内容不该穿透到遮罩上把这一层关掉：这里把点击吃掉。
+                    .pointerInput(Unit) { detectTapGestures { } },
+            ) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    content = content,
                 )
             }
-        },
-        confirmButton = { TextButton(onClick = onClose) { Text("知道了") } },
-    )
+        }
+    }
+}
+
+/** 演示里的一步：左边一个圆点（末步不画连线），右边小标题 + 正文。纯文字/图形演绎，无执行通路。 */
+@Composable
+private fun SimStep(head: String, body: String, last: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .size(9.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+            if (!last) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .width(2.dp)
+                        .height(30.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = head,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodySmall,
+                lineHeight = 20.sp,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+    }
 }
 
 /**
@@ -978,31 +1295,74 @@ private fun riskLevelLabel(spec: RelaySettings.Spec): String =
         RelaySettings.Risk.CRITICAL -> "严重"
     }
 
-/** 风险点的颜色：低=绿 / 中=黄 / 高=红（严重=深红）。浅色与深色各给一套，两边都够亮。 */
-private data class RiskColors(val dot: Color, val text: Color)
+/**
+ * 风险那一眼的四块颜色：胶囊里的色块（[dot]）、胶囊文字（[text]）、胶囊底色（[pillBg]）、
+ * 胶囊描边（[pillBorder]）。浅色与深色各给一套，正文对比度都按 WCAG 挑过：
+ * 浅色下四档 ≥5.5:1，深色下四档 ≥6:1（深色底用的是暗色块，不是把浅色底反相）。
+ */
+private data class RiskColors(
+    val dot: Color,
+    val text: Color,
+    val pillBg: Color,
+    val pillBorder: Color,
+)
 
 @Composable
 private fun riskColors(spec: RelaySettings.Spec): RiskColors {
     val dark = isSystemInDarkTheme()
     if (spec.locked) {
-        return RiskColors(MaterialTheme.colorScheme.outline, MaterialTheme.colorScheme.onSurfaceVariant)
+        return RiskColors(
+            dot = MaterialTheme.colorScheme.outline,
+            text = MaterialTheme.colorScheme.onSurfaceVariant,
+            pillBg = MaterialTheme.colorScheme.surfaceVariant,
+            pillBorder = MaterialTheme.colorScheme.outline,
+        )
     }
     return when (spec.risk) {
         RelaySettings.Risk.LOW ->
-            if (dark) RiskColors(Color(0xFF5FD08A), Color(0xFF6FD68F))
-            else RiskColors(Color(0xFF1B7F3B), Color(0xFF15652F))
+            if (dark) RiskColors(Color(0xFF5FD08A), Color(0xFF6FD68F), Color(0xFF14301F), Color(0xFF4FAE74))
+            else RiskColors(Color(0xFF1B7F3B), Color(0xFF15652F), Color(0xFFE6F4E9), Color(0xFF6FAF84))
 
         RelaySettings.Risk.MEDIUM ->
-            if (dark) RiskColors(Color(0xFFE5B94E), Color(0xFFE5B94E))
-            else RiskColors(Color(0xFF8A6100), Color(0xFF7A5600))
+            if (dark) RiskColors(Color(0xFFE5B94E), Color(0xFFE5B94E), Color(0xFF3A2F12), Color(0xFFB08F35))
+            else RiskColors(Color(0xFF8A6100), Color(0xFF7A5600), Color(0xFFFFF4CC), Color(0xFFD3A83A))
 
         RelaySettings.Risk.HIGH ->
-            if (dark) RiskColors(Color(0xFFF08A8A), Color(0xFFF08A8A))
-            else RiskColors(Color(0xFFC02626), Color(0xFFB01F1F))
+            if (dark) RiskColors(Color(0xFFF08A8A), Color(0xFFF08A8A), Color(0xFF3A1A1A), Color(0xFFC96A6A))
+            else RiskColors(Color(0xFFC02626), Color(0xFFB01F1F), Color(0xFFFDE7E7), Color(0xFFE0A0A0))
 
         RelaySettings.Risk.CRITICAL ->
-            if (dark) RiskColors(Color(0xFFFF8A8A), Color(0xFFFF9E9E))
-            else RiskColors(Color(0xFF8B1A1A), Color(0xFF8B1A1A))
+            if (dark) RiskColors(Color(0xFFFF8A8A), Color(0xFFFF9E9E), Color(0xFF3A1414), Color(0xFFD96A6A))
+            else RiskColors(Color(0xFF8B1A1A), Color(0xFF8B1A1A), Color(0xFFF6DADA), Color(0xFFCE9A9A))
+    }
+}
+
+/**
+ * 风险小胶囊：**色块 + 文字**两样都在（色盲用户靠文字也读得出来），中风险就是黄色的那一枚。
+ *
+ * 它只说等级；具体后果在旁边的 (i) 里（`riskText` 原文）。胶囊的底色与文字色见 [riskColors]。
+ */
+@Composable
+private fun RiskPill(spec: RelaySettings.Spec) {
+    val risk = riskColors(spec)
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = risk.pillBg,
+        border = BorderStroke(1.dp, risk.pillBorder),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PilotStatusDot(color = risk.dot)
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = riskLevelLabel(spec),
+                style = MaterialTheme.typography.labelMedium,
+                color = risk.text,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -1350,9 +1710,10 @@ private fun TextControl(
  * 清单型控件：**一行一条、每行单独改或删**，不再把一大串塞进一个多行框。
  *
  * 分两种走法：
- * - `approval.screen_only_templates`（6 条内置免审批动作）：点标签即切换、**当场写入**（绿色=不询问，
- *   灰色=每次问）；清单里不认识的条目原样列出，可单独改/删；「高级」里保留任意文本的添加入口，
- *   所以"自己写一个名字"这条路没被堵掉。
+ * - `approval.screen_only_templates`（6 条内置免审批动作）：二期改成**先选策略再挑标签** ——
+ *   顶上三选一（全部询问 / 全部允许 / 自定义允许），只有选"自定义"才露出下面那组短标签；
+ *   点标签即切换、**当场写入**（绿色=不询问，灰色=每次问）；清单里不认识的条目原样列出，
+ *   可单独改/删；「新增自定义动作」里保留任意文本的入口，所以"自己写一个名字"这条路没被堵掉。
  * - 其余清单（`capability.disabled`、危险项的三张名单）：保留显式保存，草稿进 [RulesEditMemory]，
  *   页面顶部会出现「有未保存的更改」。
  */
@@ -1362,9 +1723,10 @@ private fun ListControl(
     current: String,
     onApply: (String, String) -> Unit,
     edit: RulesEditMemory,
+    expansion: RulesExpansionMemory,
 ) {
     if (spec.id == RelaySettings.SCREEN_ONLY_TEMPLATES) {
-        ScreenOnlyTagControl(current = current, onApply = onApply)
+        ScreenOnlyTagControl(spec = spec, current = current, onApply = onApply, expansion = expansion)
         return
     }
 
@@ -1448,48 +1810,175 @@ private fun ListControl(
 private const val ADD_NEW = -1
 
 /**
- * `approval.screen_only_templates` 的标签控件。
+ * `approval.screen_only_templates` 的**策略 + 标签**控件（二期）。
  *
- * **点标签写进清单的永远是原值**：标签上写"打开闹钟页面"，`onApply` 里传的是 `alarm.show`
- * （见 [RulesDisplay.SCREEN_ONLY_TAGS] 的键）。绿色=不弹卡（在清单里），灰色=每次问你（不在清单里）；
- * 点一下立即保存并生效。
+ * 三档策略写进清单的语义（与 [RulesDisplay.ScreenOnlyMode] 的注释同一份口径）：
+ * - **全部询问**：写入**空清单** `[]`；
+ * - **全部允许**：写入**全部 6 条**原值；
+ * - **自定义允许**：不整体重写，只把下面那组短标签露出来，标签一枚一枚地改、各自立即写入。
+ *
+ * **点标签（以及全选/全不选）写进清单的永远是原值**：标签上写"闹钟"，`onApply` 里传的是
+ * `alarm.show`（见 [RulesDisplay.SCREEN_ONLY_TAGS] 的键）。绿色=不弹卡（在清单里），
+ * 灰色=每次问你（不在清单里）；点一下立即保存并生效。
+ *
+ * 模式本身**不落盘**：它是从"清单此刻长什么样"反推出来的；[RulesExpansionMemory.customPicking]
+ * 只记住"用户正打算逐条挑"这个界面状态，一点别的档或全选/全不选就退回反推。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ScreenOnlyTagControl(
+    spec: RelaySettings.Spec,
     current: String,
     onApply: (String, String) -> Unit,
+    expansion: RulesExpansionMemory,
 ) {
     val items = decodeList(current)
+    val derived = RulesDisplay.screenOnlyMode(items)
+    // 「自定义」不是一个存储值：用户点进来才算数；一点别的档就退回"由现值反推"。
+    val mode = if (expansion.customPicking(spec.id)) RulesDisplay.ScreenOnlyMode.CUSTOM else derived
     var adding by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<String?>(null) }
+    var legendOpen by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf<String?>(null) }
     val unknown = items.filter { raw -> raw.isNotBlank() && RulesDisplay.SCREEN_ONLY_TAGS.none { it.first == raw } }
     val lines = items
 
+    // 选了「全部询问 / 全部允许」＝整体重写清单（这一档写什么见上面的注释）；
+    // 选了「自定义允许」本身**不写任何东西**，只是把标签组露出来。
+    // 整体重写会把清单里多出来的名字（alarm.set / 自己加的名字）清掉，所以回执里逐个点名。
+    val onPickMode: (RulesDisplay.ScreenOnlyMode) -> Unit = { option ->
+        if (option == RulesDisplay.ScreenOnlyMode.CUSTOM) {
+            expansion.setCustomPicking(spec.id, true)
+        } else {
+            expansion.setCustomPicking(spec.id, false)
+            val raws = RulesDisplay.screenOnlyPolicyRaws(option) ?: emptyList()
+            val dropped = items.filter { it.isNotBlank() && it !in raws }
+            val tail = if (dropped.isEmpty()) "" else "（清单里原有的 ${dropped.joinToString("、")} 被清掉了）"
+            val head = when (option) {
+                RulesDisplay.ScreenOnlyMode.ASK_ALL -> "已改成全部询问：这 6 条以后都会先问你。"
+                RulesDisplay.ScreenOnlyMode.ALLOW_ALL -> "已改成全部允许：这 6 条以后都不弹卡。"
+                RulesDisplay.ScreenOnlyMode.CUSTOM -> ""
+            }
+            onApply(encodeList(raws), head + tail)
+        }
+    }
+
     Column {
         Text(
-            text = "点一下切换：绿色 = 助手做这类动作时不弹卡；灰色 = 每次都会先问你。点一下立刻保存生效。" +
-                "六个全灰 = 这类动作都会先问你（原样等价于这一项为空）。" +
-                "把会写东西的动作加进来，助手就能不经过你确认直接改系统状态，可能打断你当前操作。" +
-                "（下面那些说明里写的「打开页面不询问」就是这一项，是同一份清单。）",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            text = "这一项按一个策略来设：",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(bottom = 2.dp),
         )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-        ) {
-            RulesDisplay.SCREEN_ONLY_TAGS.forEach { (raw, label) ->
-                val on = raw in items
-                TagChip(label = label, on = on) {
-                    val next = if (on) items - raw else items + raw
-                    onApply(
-                        encodeList(next),
-                        if (on) "已改成每次问你：$label" else "已改成不询问：$label",
+
+        // ── 三选一：全部询问 / 全部允许 / 自定义允许 ──
+        RulesDisplay.ScreenOnlyMode.entries.forEach { option ->
+            val selected = option == mode
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPickMode(option) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = selected, onClick = { onPickMode(option) })
+                Column(modifier = Modifier.weight(1f).padding(vertical = 6.dp)) {
+                    Text(
+                        text = RulesDisplay.modeOptionLabel(option),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = RulesDisplay.modeOptionNote(option),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
+        }
+        Text(
+            text = RulesDisplay.MODE_DEFAULT_NOTE,
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalPilotExtraColors.current.tertiaryText,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
+        )
+
+        if (mode == RulesDisplay.ScreenOnlyMode.CUSTOM) {
+            // ── 只有"自定义"才露出标签组 ──
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = {
+                    expansion.setCustomPicking(spec.id, false)
+                    onApply(
+                        encodeList(RulesDisplay.SCREEN_ONLY_TAGS.map { it.first }),
+                        "6 条都选上了 —— 与「全部允许」等价，已切到那个模式。",
+                    )
+                }) { Text("全选") }
+                TextButton(onClick = {
+                    expansion.setCustomPicking(spec.id, false)
+                    onApply(
+                        encodeList(emptyList()),
+                        "6 条都改成每次问了 —— 与「全部询问」等价，已切到那个模式。",
+                    )
+                }) { Text("全不选") }
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = { legendOpen = true }) { Text("简写对照 (i)") }
+            }
+            Text(
+                text = "点一下切换：绿色 = 助手做这类动作时不弹卡；灰色 = 每次都会先问你。点一下立刻保存生效。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                RulesDisplay.SCREEN_ONLY_TAGS.forEach { (raw, label) ->
+                    val on = raw in items
+                    TagChip(
+                        label = label,
+                        on = on,
+                        onClick = {
+                            val next = if (on) items - raw else items + raw
+                            onApply(
+                                encodeList(next),
+                                if (on) "已改成每次问你：$label" else "已改成不询问：$label",
+                            )
+                        },
+                        onLongClick = { hint = RulesDisplay.tagHint(raw, label) },
+                    )
+                }
+            }
+
+            // 三级折叠：标签控件的详细说明（二期从控件顶上搬进来的那几句，一个字没删）。
+            SectionToggle(
+                label = "详细说明",
+                open = expansion.open(spec.id, RulesSection.LIST_HELP),
+                modifier = Modifier.fillMaxWidth(),
+            ) { expansion.toggle(spec.id, RulesSection.LIST_HELP) }
+            if (expansion.open(spec.id, RulesSection.LIST_HELP)) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "六个全灰 = 这类动作都会先问你（原样等价于这一项为空）。" +
+                            "把会写东西的动作加进来，助手就能不经过你确认直接改系统状态，可能打断你当前操作。" +
+                            "（下面那些说明里写的「打开页面不询问」就是这一项，是同一份清单。）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 20.sp,
+                    )
+                    Text(
+                        text = "完整语义与写入值：长按任意一枚标签，或点上面的「简写对照 (i)」。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LocalPilotExtraColors.current.tertiaryText,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "当前是" + RulesDisplay.modeOptionLabel(mode) + "，所以这里不逐条挑。" +
+                    "想逐条挑就选「自定义允许」。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         // 清单里不认识的条目：原样显示（不认识就不翻译），每一条都能单独改 / 删。
@@ -1513,13 +2002,22 @@ private fun ScreenOnlyTagControl(
             }
         }
 
+        // ── 二期：原来那颗长期占版面的「手动添加一条」按钮收了，改成这颗进底部抽屉 ──
         Spacer(modifier = Modifier.height(6.dp))
-        TextButton(onClick = { adding = true }) { Text("高级：手动添加一条") }
-        Text(
-            text = "这里写的是原样字符串（助手调用时用的名字），会逐字写进清单，不做翻译。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        TextButton(onClick = { adding = true }) { Text("新增自定义动作") }
+    }
+
+    hint?.let { line ->
+        AlertDialog(
+            onDismissRequest = { hint = null },
+            title = { Text("这枚标签是什么意思") },
+            text = { Text(line) },
+            confirmButton = { TextButton(onClick = { hint = null }) { Text("知道了") } },
         )
+    }
+
+    if (legendOpen) {
+        TagLegendDialog(onClose = { legendOpen = false })
     }
 
     editing?.let { original ->
@@ -1536,12 +2034,9 @@ private fun ScreenOnlyTagControl(
     }
 
     if (adding) {
-        ItemTextDialog(
-            initial = "",
-            title = "手动添加一条（原样写入）",
+        AddActionOverlay(
             onDismiss = { adding = false },
-            onSave = { value ->
-                val raw = value.trim()
+            onAdd = { raw ->
                 adding = false
                 if (raw.isNotEmpty() && raw !in lines) {
                     onApply(encodeList(lines + raw), "已加入清单：$raw")
@@ -1551,9 +2046,96 @@ private fun ScreenOnlyTagControl(
     }
 }
 
-/** 可点标签：开=绿（主色容器），关=灰（surfaceVariant）。文案本身带 ✓，不靠颜色单独表意。 */
+/**
+ * 简写 ↔ 完整语义 ↔ 写入原值 的三列对照（标签组的 (i)）。
+ * 与长按标签给的是同一份数据，绝不把显示词写进配置。
+ */
 @Composable
-private fun TagChip(label: String, on: Boolean, onClick: () -> Unit) {
+private fun TagLegendDialog(onClose: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("这 6 枚标签分别是什么") },
+        text = {
+            Column {
+                RulesDisplay.tagTable().forEach { (short, full, raw) ->
+                    Text(
+                        text = "「$short」= $full",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                    Text(
+                        text = "写进配置的值：$raw",
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "屏幕上显示的是简写；写进配置的永远是上面那串原值，一个字节都没变。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("知道了") } },
+    )
+}
+
+/**
+ * 「新增自定义动作」的底部抽屉（二期）：任意文本的入口还在，只是不再长期占版面。
+ *
+ * 写入语义一点没变：这里写的是**原样字符串**，逐字进清单，不做翻译。
+ */
+@Composable
+private fun AddActionOverlay(
+    onDismiss: () -> Unit,
+    onAdd: (String) -> Unit,
+) {
+    var value by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    ModalOverlay(onDismiss = onDismiss, align = Alignment.BottomCenter) {
+        Text("新增自定义动作", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "这里写的是原样字符串（助手调用时用的名字），会逐字写进清单，不做翻译。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        OutlinedTextField(
+            value = value,
+            onValueChange = { value = it; error = null },
+            label = { Text("动作名，例如 alarm.set") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = {
+                val raw = value.trim()
+                error = if (raw.isEmpty()) "写一个名字再点添加" else null
+                if (error == null) onAdd(raw)
+            }) { Text("加进清单") }
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    }
+}
+
+/** 可点标签：开=绿（主色容器），关=灰（surfaceVariant）。文案本身带 ✓，不靠颜色单独表意。
+ *
+ * 二期标签文字收成 2–3 字简写，于是**长按**这枚标签会给出它的完整语义与写入原值
+ * （`onLongClick`）——简写只是屏幕上的说法，进配置的永远是原值。
+ */
+@Composable
+private fun TagChip(
+    label: String,
+    on: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(999.dp),
         color = if (on) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -1561,7 +2143,9 @@ private fun TagChip(label: String, on: Boolean, onClick: () -> Unit) {
             1.dp,
             if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
         ),
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.pointerInput(label) {
+            detectTapGestures(onTap = { onClick() }, onLongPress = { onLongClick() })
+        },
     ) {
         Text(
             text = (if (on) "✓ " else "") + label,
