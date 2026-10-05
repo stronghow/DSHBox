@@ -790,8 +790,9 @@ private fun TemplateDocumentEditor(
     var draft by remember { mutableStateOf<TemplateDraft?>(null) }
     Column {
         Text(
-            "自定义动作 = 一个名字 + 一条写死的 action（可点名组件）。助手只能用这个名字调用，" +
-                "不能自己填 action。",
+            "自定义动作 = 显示名字 + 内部名字（小写英文，助手调用时写它）+ 一条写死的 action（可点名组件）。" +
+                "内部名字不能与内置 8 个动作重名，重了会被拒；助手只能用这个名字调用，不能自己填 action。" +
+                "「不改状态」这个勾只是标记这条动作只上屏、不新建记录；真正免不免问，还要把内部名字写进「打开页面不询问」那份清单。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -803,7 +804,7 @@ private fun TemplateDocumentEditor(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        template.name + if (template.noStateChange) "（免审批）" else "",
+                        template.name + if (template.noStateChange) "（已标记不改状态）" else "",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
@@ -1121,7 +1122,7 @@ private fun TemplateFormDialog(
                         onCheckedChange = { value = value.copy(noStateChange = it) },
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("免审批（助手做这一次不弹卡）")
+                    Text("不改状态（只上屏；免不免问由「打开页面不询问」决定）")
                 }
                 FormField("说明（可选）", value.description, { value = value.copy(description = it) })
             }
