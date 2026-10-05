@@ -1,0 +1,1151 @@
+/* ============================================================
+   DSHBox website — style.css
+   Theme: app primary green #10A37F, light glass surfaces.
+   Premium pass: aurora gradients, dot-grid texture, gradient
+   display type, gradient-bordered download card, staggered
+   reveals. Breakpoints: 360 / 390 / 768 / 1024 / 1280.
+   ============================================================ */
+
+:root {
+  /* ---------- 颜色：单一强调色 + 三级墨色 + 发丝线 ----------
+     设计约定（2026-09 改版）：
+       · 绿只做「状态 / 动作」信号（与应用内「绿色 = 开启 / 在线」同一语义），
+         不再当装饰色铺陈；因此可见的绿收敛为三档：
+           --green       动作与状态（按钮、激活项）
+           --green-strong 白底上的文字与链接（对比度足够）
+           --green-deep   品牌标本身的绿（结构性图形的深色）
+       · 结构交给发丝线（--border / --border-strong），不靠阴影堆层级。
+       · 旧名 --green-bright / --green-mint 保留为别名，避免历史规则落空。 */
+  --green: #10A37F;
+  --green-bright: #0E9775;
+  --green-mint: #0E9775;
+  --green-strong: #0A6B52;
+  --green-deep: #066A50;
+  --green-soft: #EEF7F3;
+  --green-soft-2: #F6FBF9;
+
+  --ink: #0B1A15;
+  --ink-muted: #465A53;
+  --ink-3: #7A8B84;
+
+  --surface: #F7FBF9;
+  --surface-2: #F1F7F4;
+
+  /* 玻璃名保留，但改成近乎不透明的纸面：厚玻璃是消费级观感的主要来源之一 */
+  --glass: rgba(255, 255, 255, 0.94);
+  --glass-strong: #FFFFFF;
+
+  --border: #E4EDE9;
+  --border-strong: #CFE0D9;
+
+  /* 阴影：只留“贴近纸面的那一层”，层级感改由发丝线承担 */
+  --shadow-sm: 0 1px 2px rgba(11, 26, 21, 0.04);
+  --shadow-md: 0 1px 3px rgba(11, 26, 21, 0.05), 0 10px 24px -14px rgba(11, 26, 21, 0.14);
+  --shadow-lg: 0 1px 3px rgba(11, 26, 21, 0.05), 0 28px 64px -32px rgba(6, 106, 80, 0.28);
+
+  /* 几何与应用同源：应用内形状令牌为 S=6 / M=10 / L=14，这里按网页尺度放大一档使用 */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+          "MiSans", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  /* 等宽面：承担“数据与标签”的角色（版本号、统计、层序号、分区标签）——
+     本站是终端工具的官网，等宽字让数字与标识读起来像系统读数。
+     刻意不引外链字体：项目对外部依赖敏感，且中文字体体积不可控。 */
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", "Courier New", monospace;
+
+  --container: 1160px;
+}
+
+/* ---------- Reset & base ---------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  /* 注意：这里**刻意不加** scroll-snap-type。
+     1.3.1 实测（手机视口 390×844，合成真实触摸手势，重复可复现）：
+       · scroll-snap-stop: always + snap-align: start
+         → 手指滑 100px，页面跳 545px（跨掉大半屏）——「一滑跨好几页」
+       · 改用 scroll-snap-type: y proximity（弱吸附）后：
+         → 拖动 85px 抬手后**被弹回原位**（位移全撤销）；
+           连程序化滚动 scrollTo(7388) 都被拉到 7255（差 133px）。
+     原因：本站区块高度为 1.0–2.4 屏，snap-align: start 会让吸附引擎
+     持续把位置拉回区块起点，形成"粘手/回弹"。
+     故**完全移除吸附**，改用视觉手段提供分节感（见下方 section rhythm）。 */
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 16.5px;
+  line-height: 1.7;
+  color: var(--ink);
+  background: #FFFFFF;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 纸面网格：极淡的发丝方格，只在首屏可见（原为绿点阵——点阵偏装饰，
+   方格更像工程图纸，也更安静）。 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(11, 26, 21, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 26, 21, 0.045) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.18) 55%, transparent 85%);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.18) 55%, transparent 85%);
+}
+
+img { max-width: 100%; height: auto; display: block; }
+
+/* 标题：从「到处 800 字重 + 大字距收紧」收到 700 —— 字重是层级工具，不是语气工具。
+   h1 紧一点（1.08 行高 / -0.03em）读起来更像正式文件标题，而不是宣传语。 */
+h1, h2, h3 { line-height: 1.2; margin: 0 0 0.5em; font-weight: 700; letter-spacing: -0.02em; }
+h1 { font-size: clamp(2.5rem, 5.6vw, 3.5rem); line-height: 1.08; letter-spacing: -0.03em; }
+h2 { font-size: clamp(1.6rem, 3.2vw, 2.1rem); line-height: 1.15; }
+h3 { font-size: 1.05rem; font-weight: 650; letter-spacing: -0.01em; }
+
+p { margin: 0 0 1em; }
+
+/* 键盘可达性底线：可见焦点环（鼠标点击不显示，键盘导航必须显示） */
+:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+a { color: var(--green-strong); }
+code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 0.88em;
+  background: var(--green-soft);
+  border-radius: 6px;
+  padding: 0.1em 0.4em;
+}
+
+:focus-visible {
+  outline: 3px solid var(--green);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: 24px;
+}
+.container-narrow { max-width: 820px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip: rect(0 0 0 0); overflow: hidden; white-space: nowrap;
+}
+
+/* ---------- Language visibility (JS toggles <html lang>) ---------- */
+
+html[lang="zh"] .lang-en { display: none !important; }
+html[lang="en"] .lang-zh { display: none !important; }
+
+.skip-link {
+  position: absolute; left: 12px; top: -48px;
+  z-index: 100;
+  background: var(--green); color: #fff;
+  padding: 10px 16px; border-radius: 0 0 10px 10px;
+  text-decoration: none; font-weight: 600;
+  transition: top 0.2s ease;
+}
+.skip-link:focus { top: 0; }
+
+/* ---------- Eyebrow labels ---------- */
+
+/* 分区标签：等宽 + 字距 + 中性灰，前面一条短绿线。
+   它是“文档小节号”的角色，不再是绿色的装饰条。 */
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.eyebrow::before {
+  content: "";
+  flex: none;
+  width: 18px; height: 1px;
+  background: var(--green-deep);
+}
+
+/* ---------- Buttons ----------
+   形态约定：方一点（8px，与应用形状令牌同源）、不吃内白高光、悬停只改色与边界，
+   不做位移/缩放——位移是消费级观感的来源之一，这里的层级由发丝线表达。 */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease,
+              color 0.18s ease, box-shadow 0.18s ease;
+  white-space: nowrap;
+}
+.button:active {
+  box-shadow: inset 0 2px 4px rgba(6, 106, 80, 0.18);
+}
+
+.button-primary {
+  background: var(--green);
+  color: #fff;
+}
+.button-primary:hover {
+  background: var(--green-strong);
+}
+
+.button-secondary {
+  background: #fff;
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+.button-secondary:hover {
+  border-color: var(--ink-muted);
+}
+
+.button-ghost {
+  background: #fff;
+  color: var(--green-strong);
+  border-color: var(--border-strong);
+}
+.button-ghost:hover {
+  background: var(--green-soft);
+  border-color: var(--green);
+}
+.button-ghost.is-copied {
+  background: var(--green-soft);
+  border-color: var(--green);
+  color: var(--green-strong);
+}
+
+.button-large { padding: 14px 26px; font-size: 1rem; }
+
+/* ---------- Header ---------- */
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  transition: box-shadow 0.25s ease, background-color 0.25s ease;
+}
+.site-header.is-scrolled {
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow-sm);
+}
+.header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 66px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--ink);
+}
+.brand-mark {
+  flex: none;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  box-shadow: var(--shadow-sm);
+}
+.brand-name { font-weight: 700; font-size: 1.2rem; letter-spacing: -0.02em; }
+
+.site-nav ul {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0; padding: 0;
+  list-style: none;
+}
+.site-nav a {
+  display: block;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.site-nav a:hover { color: var(--green-strong); background: var(--green-soft); }
+.site-nav .nav-github {
+  color: var(--green-strong);
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  font-weight: 600;
+}
+.site-nav .nav-github:hover { border-color: var(--green); }
+
+.header-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Language toggle */
+.lang-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.lang-btn {
+  padding: 4px 11px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+.lang-btn:hover { color: var(--green-strong); }
+.lang-btn[aria-pressed="true"] {
+  background: #fff;
+  color: var(--green-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.nav-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  width: 40px; height: 40px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  cursor: pointer;
+}
+.nav-toggle-bar,
+.nav-toggle-bar::before,
+.nav-toggle-bar::after {
+  display: block;
+  width: 20px; height: 2px;
+  border-radius: 2px;
+  background: var(--ink);
+  position: relative;
+}
+.nav-toggle-bar::before,
+.nav-toggle-bar::after {
+  content: "";
+  position: absolute; left: 0;
+}
+.nav-toggle-bar::before { top: -6px; }
+.nav-toggle-bar::after { top: 6px; }
+
+/* ---------- Hero ----------
+   取舍说明：原版有「两团漂移光斑 + 标题四段绿渐变 + 产品图上下浮动」三处动效装饰。
+   改版后全部去掉——首屏已经有纸面网格做质感，再叠光斑就是两种纹理打架；
+   层级交给字重、发丝框与一处安静的投影。 */
+
+.hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--surface) 0%, #FFFFFF 70%);
+}
+
+.hero-inner {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 48px;
+  padding-block: 76px 68px;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 22px;
+  padding: 5px 14px 5px 6px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  color: var(--green-strong);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.hero-badge img {
+  width: 30px; height: 30px;
+  border-radius: 7px;
+}
+
+.hero-title {
+  margin-bottom: 0.35em;
+  color: var(--ink);
+}
+
+.hero-subtitle {
+  font-size: clamp(1.15rem, 2.4vw, 1.4rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  max-width: 36ch;
+}
+.hero-note {
+  color: var(--ink-muted);
+  max-width: 46ch;
+  font-size: 1rem;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+/* 版本读数：版本号/体积/日期是系统数据，用等宽面读起来像设备读数 */
+.release-info {
+  margin-top: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.84rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-muted);
+}
+
+.hero-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 24px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+}
+.hero-links a { text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.hero-links a:hover { text-decoration-color: var(--green); }
+
+.hero-visual { margin: 0; position: relative; }
+.hero-visual > img {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  background: #fff;
+}
+
+/* ---------- Section rhythm ----------
+   1.3.1 修订：本站原为「整页翻页」设计，实测在手机上体验很差（见 html 处注释），
+   现已完全移除滚动吸附。分节感改由这些视觉手段承担：
+     · 区块自身的内边距节奏（.section 88px / 移动端 60px）
+     · 交替背景与上下描边（.section-tinted）
+     · 右侧页码圆点：随滚动高亮当前区块，点击可平滑跳转
+   `data-snap` 属性保留在 HTML 上，作为「区块」的语义标记 —— 页码导航据此定位。 */
+
+[data-snap] {
+  display: flex;
+  flex-direction: column;
+  /* 供锚点/页码跳转使用：跳转后区块顶部与视口顶部对齐 */
+  scroll-margin-block-start: 0;
+}
+
+[data-snap] > .container { margin-block: 0; }
+
+/* 首屏：只有 hero 需要「至少一屏」，且用 svh 规避移动端地址栏伸缩
+   导致的 100vh 偏大问题（100vh 会按地址栏收起时的最大高度计算） */
+[data-snap]#hero {
+  padding-block: 0;
+  min-height: 100svh;
+  justify-content: center;
+}
+
+/* Scroll hint at the bottom of the hero page */
+.scroll-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+.scroll-hint-mouse {
+  width: 20px;
+  height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  position: relative;
+}
+.scroll-hint-mouse::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  width: 2px;
+  height: 6px;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--green);
+  animation: scrollHintDot 2.2s ease-in-out infinite;
+}
+@keyframes scrollHintDot {
+  0%   { transform: translateY(0); opacity: 1; }
+  70%  { transform: translateY(11px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 0; }
+}
+
+/* 右侧分节指示：改成「刻度」语言——未激活是 8px 小方块，激活的那一格拉长成
+   一条短刻度并转为状态绿。它是导航控件，用刻度表达位置比圆点更贴合本站的仪表盘气质。 */
+.page-dots {
+  position: fixed;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+.page-dots button {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background-color 0.2s ease, height 0.2s ease;
+}
+.page-dots button:hover { background: var(--ink-muted); }
+.page-dots button.is-active {
+  background: var(--green);
+  height: 20px;
+}
+
+/* ---------- Stats strip ---------- */
+
+.stats { padding-block: 10px 44px; }
+/* 规格条：白纸面 + 发丝分隔 + 等宽读数（数字用等宽面读起来像设备参数表），
+   去掉了原来的渐变底与渐变数字——渐变文字是最容易显得“模板化”的一处。 */
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border-radius: var(--radius);
+  background: #fff;
+  border: 1px solid var(--border);
+}
+.stat {
+  position: relative;
+  padding: 18px 20px;
+}
+.stat + .stat::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 18px; bottom: 18px;
+  width: 1px;
+  background: var(--border);
+}
+.stat dt {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+}
+.stat dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 1.16rem;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* ---------- Sections ---------- */
+
+.section { padding-block: 84px; }
+/* 交替底改成平涂 + 上下发丝线（原为渐变）：平涂更像纸，渐变会带出“落地页”味 */
+.section-tinted {
+  background: var(--surface);
+  border-block: 1px solid var(--border);
+}
+
+.section-header {
+  max-width: 640px;
+  margin-bottom: 40px;
+}
+.section-header h2 { margin-bottom: 0.4em; }
+.section-header > p { color: var(--ink-muted); font-size: 1rem; max-width: 62ch; }
+
+/* ---------- Features ---------- */
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+/* 卡片通用配方（特性 / 截图 / 需求 / FAQ / 版本说明共用同一种“纸面”处理）：
+   白底 + 发丝边界 + 零阴影；悬停只加深边界，不做位移。 */
+.feature-card {
+  position: relative;
+  padding: 22px 20px;
+  border-radius: var(--radius);
+  background: #fff;
+  border: 1px solid var(--border);
+  transition: border-color 0.18s ease;
+}
+.feature-card:hover {
+  border-color: var(--border-strong);
+}
+.feature-card h3 { margin-bottom: 6px; font-size: 1rem; }
+.feature-card p { margin: 0; color: var(--ink-muted); font-size: 0.92rem; line-height: 1.62; }
+
+.feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+.feature-icon svg { width: 22px; height: 22px; }
+
+/* ---------- Screenshots ---------- */
+
+.shot-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+/* 截图卡：读成“接触印相表”（contact sheet）——薄边框、小内边距、
+   等宽小字图注。八张并排时整排像一组规格照片，而不是八个卡片。 */
+.shot-card {
+  margin: 0;
+  border-radius: var(--radius);
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: 8px 8px 12px;
+  transition: border-color 0.18s ease;
+}
+.shot-card:hover { border-color: var(--border-strong); }
+.shot-card img {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.shot-card figcaption {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  margin-top: 10px;
+}
+
+/* ---------- How it works ---------- */
+
+/* ---------- How it works：五层剖面（本页的签名元素）----------
+   这一节的内容自己写着 “Five layers, all on your device.”，所以不用五个并排卡片，
+   改成分层剖面：一条纵向脊线串起五层，每层是「等宽层号 + 层名 + 说明」的一行。
+   它与品牌标（四片胶囊循环压叠）同构，也如实对应真实的运行层堆叠顺序。 */
+
+.flow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  margin: 0 0 30px;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+/* 脊线：压在层号方块的中心线上（层号列宽 56px、方块宽 26px ⇒ 中心 x=13px） */
+.flow::before {
+  content: "";
+  position: absolute;
+  left: 13px; top: 0; bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+.flow-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 18px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+}
+.flow-step::before { content: none; }
+.flow-num {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px; height: 26px;
+  margin-top: 1px;
+  border-radius: 4px;
+  background: var(--green-soft);
+  border: 1px solid var(--border-strong);
+  color: var(--green-deep);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.flow-step h3 { font-size: 1rem; margin-bottom: 3px; }
+.flow-step p { margin: 0; font-size: 0.92rem; color: var(--ink-muted); max-width: 62ch; }
+
+.note-card {
+  padding: 20px 22px;
+  border-radius: var(--radius);
+  background: var(--green-soft-2);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--green-deep);
+}
+.note-card h3 { font-size: 1rem; }
+.note-card p { margin: 0; color: var(--ink-muted); }
+
+/* ---------- Requirements ---------- */
+
+.req-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.req-card {
+  padding: 24px 22px;
+  border-radius: var(--radius);
+  background: #fff;
+  border: 1px solid var(--border);
+  transition: border-color 0.18s ease;
+}
+.req-card:hover { border-color: var(--border-strong); }
+/* 卡片标题在这里是「字段名」的角色：等宽、大写、中性灰（绿色留给状态与动作） */
+.req-card h3 {
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 14px;
+}
+.req-card ul {
+  margin: 0;
+  padding-left: 1.1em;
+  color: var(--ink-muted);
+}
+.req-card li + li { margin-top: 5px; }
+
+/* ---------- Download ---------- */
+
+.section-download {
+  background: var(--surface);
+}
+/* 下载卡：去掉渐变描边环与玻璃，改成一张干净的纸（发丝边 + 一层安静的投影）。
+   这一屏是全页唯一的转化点，靠留白与居中排版压住，而不是靠发光。 */
+.download-card {
+  position: relative;
+  max-width: 720px;
+  margin-inline: auto;
+  padding: 48px 44px;
+  text-align: center;
+  border-radius: var(--radius);
+  background: #fff;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+}
+.download-card .section-header { margin-inline: auto; }
+.download-card .section-header p { font-size: 0.96rem; }
+
+.download-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin: 26px 0 6px;
+}
+.download-card .release-info { margin-top: 10px; }
+
+.download-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.download-meta li {
+  padding: 4px 11px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.download-meta a { text-decoration: none; }
+.download-meta a:hover { text-decoration: underline; }
+
+/* ---------- FAQ ---------- */
+
+/* FAQ：改成「问句清单」——一条发丝线分隔一条问答，不再是卡片堆。
+   summary 的 hover 只改字色，不做底色块。 */
+.faq-list {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.faq-item {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: #fff;
+  overflow: hidden;
+}
+.faq-item summary {
+  padding: 16px 44px 16px 2px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  position: relative;
+  transition: color 0.15s ease;
+}
+.faq-item summary:hover { color: var(--green-strong); }
+.faq-item summary::-webkit-details-marker { display: none; }
+.faq-item summary::after {
+  content: "";
+  position: absolute;
+  right: 12px; top: 50%;
+  width: 8px; height: 8px;
+  border-right: 1.5px solid var(--ink-3);
+  border-bottom: 1.5px solid var(--ink-3);
+  transform: translateY(-70%) rotate(45deg);
+  transition: transform 0.2s ease;
+}
+.faq-item[open] summary::after {
+  transform: translateY(-30%) rotate(225deg);
+}
+.faq-item p {
+  margin: 0;
+  padding: 0 44px 18px 2px;
+  color: var(--ink-muted);
+  max-width: 78ch;
+}
+
+/* ---------- Footer ---------- */
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  background: #fff;
+  padding-block: 48px 32px;
+}
+.footer-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 32px;
+  margin-bottom: 32px;
+}
+.footer-brand-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.footer-brand-row img {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+}
+.footer-col h3 {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+  margin-bottom: 14px;
+}
+.footer-col ul {
+  margin: 0; padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.footer-col a {
+  color: var(--ink-muted);
+  text-decoration: none;
+}
+.footer-col a:hover { color: var(--green-strong); text-decoration: underline; }
+.footer-brand p { color: var(--ink-muted); font-size: 0.92rem; max-width: 34ch; }
+.footer-brand .brand-name { color: var(--ink); }
+
+.footer-legal {
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+  font-size: 0.82rem;
+  color: var(--ink-3);
+}
+.footer-legal p { margin-bottom: 6px; }
+
+/* ---------- Reveal animation (staggered via --i) ----------
+   幅度与时长都收了一半：目标是「内容就位」，不是「动效表演」。 */
+.reveal {
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+  transition-delay: calc(var(--i, 0) * 40ms);
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- What's new（最新版本变化） ----------
+   两个挂载点共用同一套样式：
+     · .whats-new--hero  首页 hero 下方的精简卡
+     · .whats-new--wide  下载区的完整卡（至多 5 条 + 完整说明链接）
+   内容由 main.js 从 GitHub Release 的说明正文自动填充；HTML 里的静态内容是
+   API 不可用时的兜底（也与禁用 JS 的场景兼容）。 */
+
+.whats-new {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 16px 18px;
+}
+
+/* 无内容可展示时整体隐藏，避免出现空白框 */
+.whats-new[data-state="empty"] { display: none; }
+
+.whats-new-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.whats-new-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.whats-new-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--green-deep);
+  background: var(--green-soft);
+  border: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.whats-new-date {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--ink-3);
+}
+
+.whats-new-list {
+  margin: 0;
+  padding: 0 0 0 1.05em;
+  color: var(--ink-muted);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.whats-new-list li + li { margin-top: 4px; }
+.whats-new-list strong { color: var(--ink); font-weight: 650; }
+.whats-new-list a {
+  color: var(--green-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.whats-new-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.whats-new-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--green-strong);
+}
+
+.whats-new-more:hover { color: var(--green-bright); }
+
+/* hero 内更紧凑，避免喧宾夺主 */
+.whats-new--hero { margin-top: 20px; max-width: 620px; padding: 14px 16px; }
+.whats-new--hero .whats-new-list { font-size: 0.88rem; }
+
+/* 下载区：宽卡风格，跟随 .download-card 的居中语境 */
+.whats-new--wide {
+  margin-top: 22px;
+  text-align: left;
+  background: var(--glass);
+}
+
+@media (max-width: 768px) {
+  .whats-new { padding: 14px; }
+  .whats-new-list { font-size: 0.9rem; }
+  .whats-new--hero { max-width: none; }
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .reveal { opacity: 1; transform: none; }
+}
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+
+@media (max-width: 1280px) {
+  .feature-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1024px) {
+  .hero-inner { grid-template-columns: 1fr; gap: 44px; padding-block: 60px 52px; }
+  .hero-copy { max-width: 640px; }
+  .hero-visual { max-width: 640px; }
+  .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .shot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 五层剖面在窄屏保持单列：它表达的是「堆叠顺序」，拆成多列就不成剖面了 */
+  .req-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stats-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat + .stat::before { display: none; }
+  .footer-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 768px) {
+  .nav-toggle { display: flex; }
+  .site-nav {
+    position: absolute;
+    top: 100%; left: 0; right: 0;
+    background: var(--glass-strong);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    display: none;
+  }
+  .site-nav.is-open { display: block; }
+  .site-nav ul {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 12px 16px 16px;
+  }
+  .site-nav a { padding: 12px 14px; border-radius: 12px; }
+
+  .section { padding-block: 60px; }
+  .page-dots { display: none; }
+  .scroll-hint { display: none; }
+}
+
+@media (max-width: 480px) {
+  .container { padding-inline: 18px; }
+  .hero-inner { padding-block: 48px 44px; gap: 36px; }
+  .hero-actions .button { flex: 1 1 100%; }
+  .stats-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0; }
+  .stat { padding: 14px 16px; }
+  .stat + .stat::before { display: none; }
+  .feature-grid { grid-template-columns: 1fr; }
+  /* 截图区：手机上改**双列**小图（原为单列限宽 320px）。
+     图片是 1260×2800 的竖屏截图，单列时每张高约 711px、四张堆叠达 2844px
+     （整个区块 3.88 屏，是"页面像一长条"的主要来源）；
+     双列后每张约 171px 宽、高约 380px，区块高度约减为 1/3。 */
+  .shot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    max-width: none;
+    margin-inline: 0;
+  }
+  .shot-card { padding: 7px 7px 10px; }
+  .shot-card figcaption { margin-top: 8px; font-size: 0.82rem; }
+  .flow { grid-template-columns: 1fr; }
+  .req-grid { grid-template-columns: 1fr; }
+  .footer-grid { grid-template-columns: 1fr; gap: 26px; }
+  .download-card { padding: 38px 22px; }
+  .lang-btn { padding: 5px 9px; }
+}
