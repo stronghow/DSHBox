@@ -37,7 +37,7 @@ internal object RulesDisplay {
         "approval.screen_only_templates" to "打开页面时不再询问",
         "intent.settings_pages" to "助手能打开哪些设置页",
         "intent.user_templates" to "自定义的上屏动作",
-        "tier.per_capability" to "每条能力要不要先问你",
+        "tier.per_capability" to "逐项权限控制",
         "memory.session_grant_minutes" to "「本会话内允许」管多久",
         "surface.preference" to "助手在哪块屏上干活",
         // 高级
@@ -65,6 +65,28 @@ internal object RulesDisplay {
     /** 主标题：人话标题 → schema 标题 → id，三级兜底，任何一级都不会是空串。 */
     fun title(spec: RelaySettings.Spec): String =
         TITLES[spec.id] ?: spec.title.ifBlank { spec.id }
+
+    /**
+     * 折叠态那句副标题（一句话说作用）的人话覆盖表 —— 与 [TITLES] 同一套做法：**只换屏幕上怎么说，
+     * 不改 schema 里的任何一个字**（原文仍在开发者说明里可读，见页面里的 `summaryOverridden` 分支）。
+     *
+     * 只收"用户读不懂或会误解"的那几条：schema 原文把底层枚举直接当句子
+     * （例：`逐条设置：禁止 / 每次询问 / 完全访问。`）—— 那三个词是**能力页里的档位名**，
+     * 摆在这一行只会让人以为这里能选。没有登记在表里的仍逐字显示 `spec.summary`。
+     */
+    private val SUMMARIES: Map<String, String> = mapOf(
+        // 这一项是个入口（Link 型），本页读不到逐条状态，所以只说"能干什么"，不摆档位枚举。
+        "tier.per_capability" to "可单独配置每项能力的访问权限。",
+    )
+
+    /** 折叠态副标题：有覆盖用覆盖，没有就逐字用 schema 原文。 */
+    fun summary(spec: RelaySettings.Spec): String = SUMMARIES[spec.id] ?: spec.summary
+
+    /**
+     * 这一项的副标题是否被换过说法 —— 换过才在开发者说明里补一份 schema 原文（零丢失），
+     * 没换过就不重复渲染，免得"同一句话在一张卡里出现两遍"。
+     */
+    fun summaryOverridden(spec: RelaySettings.Spec): Boolean = spec.id in SUMMARIES
 
     /**
      * `approval.screen_only_templates` 里那 6 条内置动作的**短标签**（二期：2–3 字简写），
@@ -173,20 +195,78 @@ internal object RulesDisplay {
         ScreenOnlyMode.CUSTOM -> "自定义允许（按下面选中的）"
     }
 
-    /** 模式下面那一行解释：把"选了它会写什么"说清楚，不改任何事实。 */
+    /**
+     * 模式下面那一行解释：只留"选了它以后会怎样"这一句人话（三期）。
+     *
+     * 二期这里写的是"写入空清单：…"／"写入全部 6 条：…"——那半句是**写入语义**（技术说法），
+     * 三期把它移进策略 (i) 弹层（见 [modeWriteNote] 与 [MODE_DEFAULT_NOTE]），正文只留结果。
+     */
     fun modeOptionNote(mode: ScreenOnlyMode): String = when (mode) {
-        ScreenOnlyMode.ASK_ALL -> "写入空清单：这 6 条以后都先问你。"
-        ScreenOnlyMode.ALLOW_ALL -> "写入全部 6 条：这 6 条以后都不弹卡。"
+        ScreenOnlyMode.ASK_ALL -> "这 6 条以后都先问你。"
+        ScreenOnlyMode.ALLOW_ALL -> "这 6 条以后都不弹卡。"
         ScreenOnlyMode.CUSTOM -> "下面打勾的才不弹卡，其余每次都问你。"
     }
 
     /**
-     * 模式底下那句"出厂默认是哪一档"的说明。**必须留着**：schema 的默认值是 6 条全在
-     * （= 全部允许），把「全部询问」读成"出厂默认"会与卡片上那句「（默认）」自相矛盾。
+     * 「选这一档到底写进去什么」——写入语义的技术说明。**页面正文里不再显示**（三期），
+     * 只在策略 (i) 弹层里逐条读出。写入路径本身一个字节没动：这里只是把
+     * [screenOnlyPolicyRaws] 的行为用中文复述一遍，供弹层渲染，不参与任何写入。
+     */
+    fun modeWriteNote(mode: ScreenOnlyMode): String = when (mode) {
+        ScreenOnlyMode.ASK_ALL ->
+            "全部询问：写进配置的是一个空清单 []（这 6 条都不在清单里），每一类动作都会先问你。"
+        ScreenOnlyMode.ALLOW_ALL ->
+            "全部允许：写进配置的是那 6 条原值（与出厂默认逐字相同），这 6 条都不再弹卡。"
+        ScreenOnlyMode.CUSTOM ->
+            "自定义允许：不整体重写清单，下面每一枚标签各自写入自己那一条原值。"
+    }
+
+    /**
+     * 正文上只留的这一句出厂默认说明（三期）。
+     *
+     * 二期的正文是一整段（[MODE_DEFAULT_NOTE]），用户反馈那一段"太技术"。三期正文只留这一句，
+     * 完整那段原封不动进策略 (i) 弹层 —— **信息一个字没删，只是换了读的地方**。
+     */
+    const val MODE_DEFAULT_SHORT: String = "默认就是「全部允许」这一档。"
+
+    /**
+     * 模式底下那句"出厂默认是哪一档"的完整说明（二期原文，三期移进策略 (i) 弹层）。
+     * **必须留着**：schema 的默认值是 6 条全在（= 全部允许），把「全部询问」读成"出厂默认"
+     * 会与卡片上那句「（默认）」自相矛盾。
      */
     const val MODE_DEFAULT_NOTE: String =
         "出厂默认是「全部允许」（这 6 条都在清单里）；「全部询问」是你自己能选的最安全一档，" +
             "它写的是空清单，和「恢复默认」不是一回事。"
+
+    /**
+     * 标签组上方那一行引导（三期：**只留一行**）。
+     *
+     * 二期这里是两句话的长段落；三期把绿色/灰色怎么读压成一句，其余解释（为什么、代价、
+     * 与「打开页面不询问」是不是同一份清单）整段收进策略 (i)（见 [TAG_LIST_HELP]）。
+     */
+    const val CUSTOM_GUIDE: String =
+        "点一下切换：绿色 = 免问，灰色 = 每次先问（点一下立刻保存生效）。"
+
+    /**
+     * 没露出标签组时的那一行指路（三期）。只指路、不重复"这一档会写什么"——
+     * 那已经写在各档自己的小字里了（见 [modeOptionNote]）。
+     */
+    const val NO_TAG_PICKING_HINT: String = "想逐条挑就选上面的「自定义允许」。"
+
+    /**
+     * 标签控件那段长解释（**二期原文，三期整段移进策略 (i) 弹层，一个字没删**）。
+     *
+     * 它解释的是"六个全灰"的含义、把会写东西的动作加进来的代价，以及它与「打开页面不询问」
+     * 是同一份清单 —— 这三条事实一条都不能丢，只是不再占卡片正文。
+     */
+    const val TAG_LIST_HELP: String =
+        "六个全灰 = 这类动作都会先问你（原样等价于这一项为空）。" +
+            "把会写东西的动作加进来，助手就能不经过你确认直接改系统状态，可能打断你当前操作。" +
+            "（下面那些说明里写的「打开页面不询问」就是这一项，是同一份清单。）"
+
+    /** 长解释末尾那句指路（跟着 [TAG_LIST_HELP] 一起进 (i) 弹层）。 */
+    const val TAG_HINT_POINTER: String =
+        "完整语义与写入值：长按任意一枚标签，或点「简写对照 (i)」看三列对照。"
 
     // ───────────────────────── 卡片警示：会写系统的动作 ─────────────────────────
 

@@ -1,5 +1,8 @@
 package dshbox.adapter.ui
 
+import android.provider.Settings
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,15 +21,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -46,13 +52,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -64,6 +75,7 @@ import interlock.relay.core.settings.RelaySettings
 import interlock.relay.core.settings.SettingsStore
 import interlock.relay.core.exec.direct.IntentExtra
 import interlock.relay.core.exec.direct.IntentTemplateCatalog
+import interlock.relay.core.exec.direct.IntentTemplates
 import interlock.relay.core.exec.direct.UserIntentTemplate
 import interlock.relay.core.exec.direct.UserSettingsPage
 import kotlinx.coroutines.delay
@@ -81,7 +93,9 @@ import org.json.JSONObject
  * - [DETAIL]   二级：只留**精简版**「改了会怎样」与「代价」（＋只读说明）；
  * - [DEV_NOTE] 三级：在 DETAIL 里再折一次，装完整原文 / 为什么默认这样 / 影响范围 ——
  *   偏开发者的内容退到这一层，**一个字都没删**；
- * - [LIST_HELP] 三级（清单型那一项专用）：标签控件的详细说明，同样是折叠的；
+ * - [LIST_HELP] 三级（清单型那一项专用）：三期起**不再使用** —— 标签控件那段长解释整段
+ *   移进了策略 (i) 弹层（`StrategyExplainDialog`，读 `RulesDisplay.TAG_LIST_HELP`），
+ *   枚举值原样留着，页面的手风琴记忆键名不因此漂移；
  * - [EDITOR]   编辑控件。
  *
  * 四级状态全部由 [RulesExpansionMemory] 记住：切到子页再回来，手风琴该开着的还开着。
@@ -185,6 +199,9 @@ class RulesEditMemory {
  * - **即改即生效**：开关 / 单选 / 数字一改就写；短文本与清单保留显式保存，且有"未保存"提示条。
  * - **风险可视化**：低=绿 / 中=黄 / 高=红 / 严重=深红，都是一枚带色块的小胶囊，点旁边的 (i) 看后果原文；
  *   卡片里出现"会写系统的动作"时，整张卡片实时染成淡黄底 + 琥珀边。
+ * - **三期再瘦身（呈现层）**：卡片正文只留一句结论，写入语义 / 长解释整段进 (i) 弹层；
+ *   「模拟运行一次」回到折叠态（卡末虚线框按钮，全页一处）；「新增自定义动作」改成小胶囊 + Modal；
+ *   「恢复默认」换成次要色文字；全选 / 全不选 / 简写对照排成同一行。
  *
  * 这一页不滚动：外层 [PilotScreen] 的 Column 已经带 verticalScroll，这里再套一层同轴滚动会在运行时崩。
  * 二期的「模拟运行一次」遮罩层与「新增自定义动作」底部抽屉走各自的 `Dialog` 窗口，不受这一条约束。
@@ -577,9 +594,18 @@ private fun warningCardBorder(): BorderStroke =
  * 颜色固定：浅色下 #6B4E00 压 #FFF8E1（≈7.8:1），深色下 #F0D9A0 压 #3A2F12（≈9:1），
  * 两套都过 WCAG 正文对比度。**不跟主题色走**：它说的是同一件事 —— 你现在放行的动作会直接改设备状态。
  */
+/**
+ * 警示用的那支"墨色"：浅色下 #6B4E00、深色下 #F0D9A0。
+ * 两套都按 WCAG 正文对比度挑过（压 #FFF8E1 / #3A2F12 与弹窗底色都过），
+ * 与卡片级警示条、设置页弹窗里那行 ⚠ 用的是同一支，不跟主题色走。
+ */
+@Composable
+private fun warningInk(): Color =
+    if (isSystemInDarkTheme()) Color(0xFFF0D9A0) else Color(0xFF6B4E00)
+
 @Composable
 private fun StateWriteWarningNotice(text: String) {
-    val ink = if (isSystemInDarkTheme()) Color(0xFFF0D9A0) else Color(0xFF6B4E00)
+    val ink = warningInk()
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
         verticalAlignment = Alignment.Top,
@@ -624,8 +650,10 @@ private fun findSettingRow(rows: List<RelayContainer.SettingRow>, id: String): R
  * 一项配置的卡片正文。折叠态只有"风险胶囊 + 人话标题 + 一句话作用 + 当前状态"，长内容按需展开。
  *
  * - 「了解风险与代价」里只留精简版「改了会怎样」与「代价」，还有一颗「开发者说明 ▾」二级折叠
- *   （完整原文 / 为什么默认这样 / 影响范围），外加「模拟运行一次」；
- * - 「改这一项」放控件与「恢复默认」，危险项的子名单跟着它出现。
+ *   （完整原文 / 为什么默认这样 / 影响范围）；
+ * - 「模拟运行一次」**在折叠态就看得见**（三期找回）：它是这一张卡正文末尾那颗虚线框按钮，
+ *   全页只有这一处；点开的是二期那颗自绘遮罩层；
+ * - 「改这一项」放控件与「恢复默认」（更弱的次要色文字），危险项的子名单跟着它出现。
  *
  * 需要显式保存的控件（短文本 / 清单）把草稿写进 [RulesEditMemory]；开关 / 单选 / 数字直接落盘。
  *
@@ -651,6 +679,9 @@ private fun SettingRowItem(
     flashId: String?,
 ) {
     val spec = row.spec
+    // Link 型（tier.per_capability / surface.preference / danger.dangerous_tier_defaults 等）：
+    // 这一项本身没有值，只是一个入口。折叠态与展开态都要按这个事实说话。
+    val linkType = spec.type as? RelaySettings.Type.Link
     // 本行的写入目标：永远是这一行的 spec.id。父项与子项各自绑各自，不共用一条。
     val applySelf: (String, String) -> Unit = { encoded, phrase -> onApply(spec.id, encoded, phrase) }
     val resetSelf: () -> Unit = { onReset(spec.id) }
@@ -700,7 +731,9 @@ private fun SettingRowItem(
         )
     }
     Text(
-        text = spec.summary,
+        // 六期：副标题走显示层（有覆盖用覆盖，没有就逐字用 schema 原文）—— 覆盖表只收"把底层枚举
+        // 当句子说"的那一条，schema 一个字没动，原文在开发者说明里仍读得到。
+        text = RulesDisplay.summary(spec),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         lineHeight = 21.sp,
@@ -710,16 +743,29 @@ private fun SettingRowItem(
         modifier = Modifier.padding(top = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = "当前：" + valueSummary(row) + if (row.isDefault) "（默认）" else "（已改）",
-            style = currentValueStyle(spec),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            lineHeight = 19.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            onTextLayout = { valueClipped = it.hasVisualOverflow },
-            modifier = Modifier.weight(1f),
-        )
+        if (linkType != null) {
+            // Link 型这一项**本身没有值**（数值都存在它指向的那个页面里），本页也读不到那边的状态。
+            // 所以不写"当前：点开设置（默认）"那种看着像"这里有个可改的值"的说法，
+            // 只说清"没有值 + 状态在哪"，绝不编"已调整 N 项"。
+            Text(
+                text = "这一项没有值：状态在它对应的设置页里，本页读不到。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 19.sp,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Text(
+                text = "当前：" + valueSummary(row) + if (row.isDefault) "（默认）" else "（已改）",
+                style = currentValueStyle(spec),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 19.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { valueClipped = it.hasVisualOverflow },
+                modifier = Modifier.weight(1f),
+            )
+        }
         if (flashId == spec.id) {
             Text(
                 text = "已保存 ✓",
@@ -759,15 +805,14 @@ private fun SettingRowItem(
             open = expansion.open(spec.id, RulesSection.DETAIL),
             modifier = Modifier.weight(1f),
         ) { expansion.toggle(spec.id, RulesSection.DETAIL) }
-        val link = spec.type as? RelaySettings.Type.Link
-        if (link != null) {
+        if (linkType != null) {
             // 链接型项没有可编辑的值，本身就是一个入口：这一颗直接进那一页，比展开再点一下少一步。
             SectionToggle(
                 label = "打开设置",
                 open = false,
                 modifier = Modifier.weight(1f),
                 arrow = "›",
-            ) { onOpenLink(linkTarget(link.target)) }
+            ) { onOpenLink(linkTarget(linkType.target)) }
         } else {
             SectionToggle(
                 label = "改这一项",
@@ -806,16 +851,30 @@ private fun SettingRowItem(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    DetailBlock("改了会怎样", spec.effect)
+                    // ── 六期：这一层**只讲底层机制**，不再把二级那句用户向的话原文再说一遍 ──
+                    // 二级显示的是精简版（原文开头的完整句子）。当精简版**就是**原文时，
+                    // 这一段与上面那句逐字相同 —— 直接不渲染（同页二级仍可读到，不算信息丢失）；
+                    // 只有精简版确实短于原文时才在下面补完整原文（内容不同，一个字都不删）。
+                    if (RulesDisplay.effectShortened(spec)) {
+                        DetailBlock("改了会怎样", spec.effect)
+                    }
+                    // 换过说法的副标题（目前只有 tier.per_capability 一条）：把 schema 原文补在这里，
+                    // 免得"改得更人话"等于"原文消失"。没换过就不渲染，避免同一句在卡里出现两遍。
+                    if (RulesDisplay.summaryOverridden(spec)) {
+                        DetailBlock("原文（折叠态那句话）", spec.summary)
+                    }
                     DetailBlock("为什么默认这样", spec.whyDefault)
                     DetailBlock("影响范围", spec.scope)
                 }
             }
 
-            TextButton(onClick = { simulateOpen = true }) { Text("模拟运行一次") }
-            TextButton(onClick = { advancedShown = !advancedShown }) {
-                Text(if (advancedShown) "收起高级信息" else "高级：标识符与默认值")
-            }
+            // 三期：「模拟运行一次」从这里搬回**折叠态**（见下面那颗虚线框按钮，全页只有那一处）——
+            // 用户反馈二期把它藏在二级里，"在页面上看不到"。这一块只留高级信息开关。
+            // 六期：这颗开关外面也包一层虚线框（与"模拟运行一次"同一套壳），把"极客区"从常规配置里分出来。
+            DashedActionButton(
+                onClick = { advancedShown = !advancedShown },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) { Text(if (advancedShown) "高级：标识符与默认值 ▴" else "高级：标识符与默认值 ▾") }
         }
     }
 
@@ -909,7 +968,14 @@ private fun SettingRowItem(
 
             if (!row.isDefault && !spec.locked) {
                 Spacer(modifier = Modifier.height(6.dp))
-                TextButton(onClick = resetSelf) { Text("恢复默认") }
+                // 三期：「恢复默认」换成更弱的一档（次要色文字）——它是"拨回去"的动作，
+                // 不该和上面那些真改配置的按钮抢注意力，也就不容易被误触。
+                TextButton(
+                    onClick = resetSelf,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    ),
+                ) { Text("恢复默认") }
             }
 
             // 危险项的子规则挂在父项"改这一项"展开之后（父项是"点系统授权框前先问你"，
@@ -936,6 +1002,16 @@ private fun SettingRowItem(
             }
         }
     }
+
+    // ── 三期：「模拟运行一次」回到**折叠态**（全页唯一一处）──
+    // 不展开任何一块也看得见、点得开。位置在这一张卡正文的末尾：免问清单那一项把「改这一项」
+    // 摊开时，它正好落在标签组（以及「新增自定义动作」）的下一行 —— 就是用户草图上要的那一行。
+    // 点开的仍是二期那颗自绘遮罩层（三步演绎 + preview 原文 + 满意 / 再改改），零执行通路。
+    DashedActionButton(
+        onClick = { simulateOpen = true },
+        icon = "▶",
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) { Text("模拟运行一次") }
 
     pendingSwitch?.let { next ->
         DangerConfirmDialog(
@@ -1042,9 +1118,13 @@ private fun SectionToggle(
 private fun DetailBlock(label: String, text: String) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
+            // 六期：二级小标题原来是主色（满屏浅绿、四块一排看下来很累）。改成**低调深灰 + 半粗**：
+            // 仍然分得开层级，但不再和正文抢注意力。两套主题都用 onSurfaceVariant，
+            // 浅色 (#49454F on #FFFBFE ≈ 8.6:1) / 深色 (#CAC4D0 on #1C1B1F ≈ 10.9:1) 都过 WCAG 正文。
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = text,
@@ -1187,17 +1267,42 @@ private fun SimulateDialog(
 private fun ModalOverlay(
     onDismiss: () -> Unit,
     align: Alignment = Alignment.Center,
+    scrimAlpha: Float = MODAL_SCRIM_ALPHA,
+    maxWidth: Dp = MODAL_MAX_WIDTH,
+    sidePadding: Dp = MODAL_SIDE_PADDING,
+    footer: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    // 出入动效（三期四期）：缩放 0.9→1.0 + 淡入 0→1，约 200ms，与蒙层同步。
+    // 关掉时先播完再真正 onDismiss，所以"关"不会硬切；三个关闭路径（✕ / 点蒙层 / 返回键）
+    // 都走同一个 close()，因此都只有动画、没有任何写入。
+    var shown by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    LaunchedEffect(closing) {
+        if (closing) {
+            delay(MODAL_ANIM_MS.toLong())
+            onDismiss()
+        }
+    }
+    val close: () -> Unit = { if (!closing) closing = true }
+    val enter by animateFloatAsState(
+        targetValue = if (shown && !closing) 1f else 0f,
+        animationSpec = tween(durationMillis = MODAL_ANIM_MS),
+        label = "modal-enter",
+    )
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = close,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.62f))
-                .clickable(onClick = onDismiss),
+                .background(Color.Black.copy(alpha = scrimAlpha * enter))
+                .clickable(onClick = close)
+                // 键盘弹起时把面板整体往上让：输入框与底部按钮都不会被软键盘压住。
+                .imePadding()
+                .padding(horizontal = sidePadding, vertical = MODAL_VERTICAL_PADDING),
             contentAlignment = align,
         ) {
             Surface(
@@ -1205,21 +1310,47 @@ private fun ModalOverlay(
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier
+                    // 大屏 / 横屏 / 折叠屏上不拉成一整条：撑满可用宽度但不超过 maxWidth，并水平居中。
+                    .widthIn(max = maxWidth)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 24.dp)
+                    .graphicsLayer {
+                        scaleX = MODAL_SCALE_FROM + (1f - MODAL_SCALE_FROM) * enter
+                        scaleY = scaleX
+                        alpha = enter
+                    }
                     // 点内容不该穿透到遮罩上把这一层关掉：这里把点击吃掉。
                     .pointerInput(Unit) { detectTapGestures { } },
             ) {
-                Column(
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    content = content,
-                )
+                Column(modifier = Modifier.padding(MODAL_PANEL_PADDING)) {
+                    // 中段可滚动；标题与底部按钮由调用方放在 footer 里，永远留在可见区。
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState()),
+                        content = content,
+                    )
+                    footer?.let {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        it()
+                    }
+                }
             }
         }
     }
 }
+
+/** 遮罩层的不透明度（四期加深：0.62 → 0.74）。 */
+private const val MODAL_SCRIM_ALPHA = 0.74f
+
+/** 居中弹窗的最大宽度：大屏 / 横屏下不拉成一整条（竖屏左右各留 [MODAL_SIDE_PADDING]）。 */
+private val MODAL_MAX_WIDTH = 400.dp
+private val MODAL_SIDE_PADDING = 24.dp
+private val MODAL_VERTICAL_PADDING = 24.dp
+private val MODAL_PANEL_PADDING = 16.dp
+
+/** 出入动效时长与起始缩放（0.9 → 1.0）。 */
+private const val MODAL_ANIM_MS = 200
+private const val MODAL_SCALE_FROM = 0.9f
 
 /** 演示里的一步：左边一个圆点（末步不画连线），右边小标题 + 正文。纯文字/图形演绎，无执行通路。 */
 @Composable
@@ -1594,7 +1725,25 @@ private fun ChoiceControl(
  * 逐字符判断而不是等失焦：界面上没有"保存"这颗按钮，等失焦就等于"我填完了它却没生效"。
  * 填的不是合法整数时只给一句提示、不写盘 —— 校验口径仍在 [SettingsStore]（这里只挡在前面）。
  */
+/**
+ * 「本会话内允许」管多久的常用档（分钟）。规格来自 schema：
+ * `Type.Number(min = 1, max = 1440, unit = "分钟")`、默认 `30`，所以四档全部落在合法区间内。
+ *
+ * **刻意没有"不限 / 始终允许"**：这一项在机制上只有 1..1440 分钟，
+ * 到点自动失效、也不跨会话（schema 的 effect 原文："到点后自动失效，不跨会话"），
+ * 所以界面里不给那一档 —— 摆一颗点不动的"始终允许"比不摆更糟。
+ */
+private val SESSION_GRANT_PRESETS: List<Int> = listOf(5, 15, 30, 60)
+
+/** 预设胶囊上的说法：30 是 schema 的默认值，就地标出来，省得用户去别处猜。 */
+private fun sessionGrantLabel(minutes: Int): String = when (minutes) {
+    60 -> "1小时"
+    30 -> "30分钟（默认）"
+    else -> "${minutes}分钟"
+}
+
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun NumberControl(
     spec: RelaySettings.Spec,
     type: RelaySettings.Type.Number,
@@ -1604,7 +1753,39 @@ private fun NumberControl(
     var text by remember(spec.id) { mutableStateOf(current) }
     var hint by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf<String?>(null) }
+    // 一处写入：输入框与下面的预设胶囊走的是**同一条路**（同一个数值键、同一套合法区间判定）。
+    val applyMinutes: (Int) -> Unit = { n ->
+        text = n.toString()
+        hint = null
+        if (spec.holdToConfirm) pending = n.toString()
+        else onApply(n.toString(), "已保存：${RulesDisplay.title(spec)} → $n${type.unit}")
+    }
     Column {
+        // 六期：时间/数量这类"有几个人人都在用的档"给一排预设胶囊，点一下即写入。
+        // 预设值全部落在 schema 声明的区间里（见 SESSION_GRANT_PRESETS），**没有"不限"这一档** ——
+        // 机制上不存在"始终允许"（1..1440 分钟，到点失效、不跨会话），所以这里也不摆那颗按钮。
+        if (spec.id == RelaySettings.SESSION_GRANT_MINUTES) {
+            Text(
+                text = "常用档（点一下立刻生效）：",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FlowRow(
+                modifier = Modifier.padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                SESSION_GRANT_PRESETS.forEach { minutes ->
+                    val on = current.trim().toIntOrNull() == minutes
+                    TagChip(
+                        label = sessionGrantLabel(minutes),
+                        on = on,
+                        onClick = { applyMinutes(minutes) },
+                        onLongClick = { applyMinutes(minutes) },
+                    )
+                }
+            }
+        }
         OutlinedTextField(
             value = text,
             onValueChange = { raw ->
@@ -1823,6 +2004,10 @@ private const val ADD_NEW = -1
  *
  * 模式本身**不落盘**：它是从"清单此刻长什么样"反推出来的；[RulesExpansionMemory.customPicking]
  * 只记住"用户正打算逐条挑"这个界面状态，一点别的档或全选/全不选就退回反推。
+ *
+ * 三期把卡片正文上的技术解释收进标题行那颗 (i)（[StrategyExplainDialog]）：正文只剩
+ * "默认就是「全部允许」这一档。"与标签组上方那一行引导，三档各写进什么、出厂默认的原话、
+ * 标签那段长解释全部仍在 (i) 里读得到。写入路径与写入值**一个字节没动**。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1839,6 +2024,7 @@ private fun ScreenOnlyTagControl(
     var adding by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<String?>(null) }
     var legendOpen by remember { mutableStateOf(false) }
+    var explainOpen by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf<String?>(null) }
     val unknown = items.filter { raw -> raw.isNotBlank() && RulesDisplay.SCREEN_ONLY_TAGS.none { it.first == raw } }
     val lines = items
@@ -1864,11 +2050,23 @@ private fun ScreenOnlyTagControl(
     }
 
     Column {
-        Text(
-            text = "这一项按一个策略来设：",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(bottom = 2.dp),
-        )
+        // 三期：标题行右边挂一枚 (i) —— 正文里收走的那几句技术解释（每一档写进去什么、
+        // 出厂默认那一句、标签那段长文）全在这颗 (i) 里，一个事实都没丢。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "这一项按一个策略来设：",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = " (i)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clickable { explainOpen = true }
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+            )
+        }
 
         // ── 三选一：全部询问 / 全部允许 / 自定义允许 ──
         RulesDisplay.ScreenOnlyMode.entries.forEach { option ->
@@ -1894,7 +2092,8 @@ private fun ScreenOnlyTagControl(
             }
         }
         Text(
-            text = RulesDisplay.MODE_DEFAULT_NOTE,
+            // 三期：正文只留这一句（二期那一整段技术解释进了上面的 (i)）。
+            text = RulesDisplay.MODE_DEFAULT_SHORT,
             style = MaterialTheme.typography.labelSmall,
             color = LocalPilotExtraColors.current.tertiaryText,
             lineHeight = 17.sp,
@@ -1903,28 +2102,36 @@ private fun ScreenOnlyTagControl(
 
         if (mode == RulesDisplay.ScreenOnlyMode.CUSTOM) {
             // ── 只有"自定义"才露出标签组 ──
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = {
+            // 三期：三颗小胶囊排成**同一行**（窄屏自己换行），不再各占一大块版面。
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                PilotSmallChip(onClick = {
                     expansion.setCustomPicking(spec.id, false)
                     onApply(
                         encodeList(RulesDisplay.SCREEN_ONLY_TAGS.map { it.first }),
                         "6 条都选上了 —— 与「全部允许」等价，已切到那个模式。",
                     )
                 }) { Text("全选") }
-                TextButton(onClick = {
+                PilotSmallChip(onClick = {
                     expansion.setCustomPicking(spec.id, false)
                     onApply(
                         encodeList(emptyList()),
                         "6 条都改成每次问了 —— 与「全部询问」等价，已切到那个模式。",
                     )
                 }) { Text("全不选") }
-                Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = { legendOpen = true }) { Text("简写对照 (i)") }
+                PilotSmallChip(onClick = { legendOpen = true }) {
+                    Text("简写对照 (i)", color = MaterialTheme.colorScheme.primary)
+                }
             }
             Text(
-                text = "点一下切换：绿色 = 助手做这类动作时不弹卡；灰色 = 每次都会先问你。点一下立刻保存生效。",
+                // 三期：标签上方**只留这一行引导**（颜色怎么读 + 立刻生效）；其余解释在 (i) 里。
+                text = RulesDisplay.CUSTOM_GUIDE,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
             )
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1947,35 +2154,13 @@ private fun ScreenOnlyTagControl(
                     )
                 }
             }
-
-            // 三级折叠：标签控件的详细说明（二期从控件顶上搬进来的那几句，一个字没删）。
-            SectionToggle(
-                label = "详细说明",
-                open = expansion.open(spec.id, RulesSection.LIST_HELP),
-                modifier = Modifier.fillMaxWidth(),
-            ) { expansion.toggle(spec.id, RulesSection.LIST_HELP) }
-            if (expansion.open(spec.id, RulesSection.LIST_HELP)) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "六个全灰 = 这类动作都会先问你（原样等价于这一项为空）。" +
-                            "把会写东西的动作加进来，助手就能不经过你确认直接改系统状态，可能打断你当前操作。" +
-                            "（下面那些说明里写的「打开页面不询问」就是这一项，是同一份清单。）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = 20.sp,
-                    )
-                    Text(
-                        text = "完整语义与写入值：长按任意一枚标签，或点上面的「简写对照 (i)」。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = LocalPilotExtraColors.current.tertiaryText,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
-            }
+            // 三期：原来那颗「详细说明 ▾」三级折叠整段收进标题行的 (i) 弹层
+            // （与单选/标签的解释本就有重复，用户要求去重）—— 长文一个字没删，见
+            // RulesDisplay.TAG_LIST_HELP，渲染在 StrategyExplainDialog 里。
         } else {
             Text(
-                text = "当前是" + RulesDisplay.modeOptionLabel(mode) + "，所以这里不逐条挑。" +
-                    "想逐条挑就选「自定义允许」。",
+                // 三期：不再重复"这一档会写什么"（那已经写在各档自己的小字里），只留一行指路。
+                text = RulesDisplay.NO_TAG_PICKING_HINT,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2003,8 +2188,14 @@ private fun ScreenOnlyTagControl(
         }
 
         // ── 二期：原来那颗长期占版面的「手动添加一条」按钮收了，改成这颗进底部抽屉 ──
-        Spacer(modifier = Modifier.height(6.dp))
-        TextButton(onClick = { adding = true }) { Text("新增自定义动作") }
+        // ── 三期：它自己也不是纯文字按钮了，改成与标签呼应的小胶囊（虚线框 + ＋），
+        //    点开仍是那颗 Modal 输入框（AddActionOverlay），不在卡片底部长期展开输入框。
+        Spacer(modifier = Modifier.height(8.dp))
+        DashedActionButton(
+            onClick = { adding = true },
+            icon = "＋",
+            pill = true,
+        ) { Text("新增自定义动作") }
     }
 
     hint?.let { line ->
@@ -2014,6 +2205,10 @@ private fun ScreenOnlyTagControl(
             text = { Text(line) },
             confirmButton = { TextButton(onClick = { hint = null }) { Text("知道了") } },
         )
+    }
+
+    if (explainOpen) {
+        StrategyExplainDialog(onClose = { explainOpen = false })
     }
 
     if (legendOpen) {
@@ -2035,6 +2230,10 @@ private fun ScreenOnlyTagControl(
 
     if (adding) {
         AddActionOverlay(
+            // 场景一：免问清单 —— 加进去当场就免问。
+            context = ActionNameContext.SCREEN_ONLY,
+            // 可点清单 = 内置 8 条动作 + 这份清单里已有的条目。
+            suggestions = IntentTemplates.names + lines,
             onDismiss = { adding = false },
             onAdd = { raw ->
                 adding = false
@@ -2044,6 +2243,55 @@ private fun ScreenOnlyTagControl(
             },
         )
     }
+}
+
+/**
+ * 策略 (i) 弹层（三期）：把二期写在卡片正文上的那几句**技术解释**整段收进来 ——
+ * 三档各写进什么（写入语义）、出厂默认是哪一档（[RulesDisplay.MODE_DEFAULT_NOTE] 原文）、
+ * 标签控件那段长解释（[RulesDisplay.TAG_LIST_HELP] 原文）。
+ *
+ * **一个字都没删，只是换了读的地方**：正文只留一行结论（默认就是「全部允许」这一档）。
+ * 这里是纯静态说明，不写任何配置、不执行任何动作。
+ */
+@Composable
+private fun StrategyExplainDialog(onClose: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("这一项的策略说明") },
+        text = {
+            Column {
+                Text("选一档，写进配置的是什么：", style = MaterialTheme.typography.labelLarge)
+                RulesDisplay.ScreenOnlyMode.entries.forEach { option ->
+                    Text(
+                        text = RulesDisplay.modeOptionLabel(option),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    Text(
+                        text = RulesDisplay.modeWriteNote(option),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(RulesDisplay.MODE_DEFAULT_NOTE, style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = RulesDisplay.TAG_LIST_HELP,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 20.sp,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = RulesDisplay.TAG_HINT_POINTER,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalPilotExtraColors.current.tertiaryText,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("知道了") } },
+    )
 }
 
 /**
@@ -2082,45 +2330,180 @@ private fun TagLegendDialog(onClose: () -> Unit) {
 }
 
 /**
- * 「新增自定义动作」的底部抽屉（二期）：任意文本的入口还在，只是不再长期占版面。
+ * 「新增自定义动作」弹窗的**两个使用场景**。小字提示按场景给不同的话 —— 两件事的语义不一样，
+ * 不能混用：
+ *
+ * - [SCREEN_ONLY]  在「打开页面时不再询问」（`approval.screen_only_templates`）里加条目：
+ *   加进去**当场就免问**；
+ * - [USER_TEMPLATE] 在「自定义的上屏动作」（`intent.user_templates`）里登记一个动作名：
+ *   这只是**登记**，免不免问由免问清单那一项说了算（schema 明写"真正免不免问由清单决定"）。
+ */
+private enum class ActionNameContext { SCREEN_ONLY, USER_TEMPLATE }
+
+/** 按场景给的小字提示（句子的语义见上面的枚举）。 */
+private fun actionNameHint(context: ActionNameContext): String = when (context) {
+    ActionNameContext.SCREEN_ONLY -> "添加后，这条动作将立即不再询问。"
+    ActionNameContext.USER_TEMPLATE ->
+        "这只是登记一条动作；要不要免问，要去「打开页面时不再询问」里再加一次。"
+}
+
+/**
+ * 动作名的形状：**与配置中心对"内部名字"的校验同一把尺子**
+ * （`IntentTemplateCatalog.TEMPLATE_ID = [a-z][a-z0-9._-]{1,40}`：小写字母开头，
+ * 可含小写字母、数字与 `.` `_` `-`）。
+ *
+ * 为什么不用更严的"只要小写字母、数字、句号"：免问清单这一项在存储层只校验
+ * "是清单 / ≤64 条 / 每条 ≤200 字"，真正卡住"这个名字能不能被助手调用"的是上面那条内部名字语法；
+ * 把 `_` `-` 也判成非法，用户自己建的动作 `my-action` 就再也加不进免问清单了 —— 那是凭空收紧。
+ */
+private val ACTION_NAME = Regex("[a-z][a-z0-9._-]{1,40}")
+
+/** 格式不合法时输入框下面那一句（用户原话）。 */
+private const val ACTION_NAME_FORMAT_HINT = "动作名只能包含英文小写字母、数字和英文句号。"
+
+/** 格式提示的第二行：把源码口径写清楚，免得用户以为是我们编的。 */
+private const val ACTION_NAME_SOURCE_NOTE =
+    "自建动作名的内部名字还可以用下划线和连字符，这里与配置中心对内部名字的校验保持一致。"
+
+/**
+ * 「新增自定义动作」的 Modal 输入框（四期：从底部面板改成**居中弹窗**，并补齐校验 / 引导 / 关闭路径）。
  *
  * 写入语义一点没变：这里写的是**原样字符串**，逐字进清单，不做翻译。
+ *
+ * - **三段式**：标题栏（标题 + ✕）/ 中间（输入框 + 提示）/ 底部按钮（取消 + 加进清单，靠右）；
+ * - **键盘避让**：面板走 `ModalOverlay` 的 `imePadding()`，中段可滚动、底部按钮在滚动区之外，
+ *   所以软键盘弹起时输入框与两颗按钮都在可见区（极小屏上最多是中段要滚一下）；
+ * - **宽度**：竖屏左右各留 24dp，大屏 / 横屏 / 折叠屏最大 400dp 并水平居中；
+ * - **关闭路径**：✕ / 点蒙层 / 返回键三条都只是关掉这一层，**不写任何配置**；
+ * - **校验**：空或不合 [ACTION_NAME] 时「加进清单」变灰禁用，输入框标红并给出那一句提示。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddActionOverlay(
+    context: ActionNameContext,
+    suggestions: List<String>,
     onDismiss: () -> Unit,
     onAdd: (String) -> Unit,
 ) {
     var value by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    ModalOverlay(onDismiss = onDismiss, align = Alignment.BottomCenter) {
-        Text("新增自定义动作", style = MaterialTheme.typography.titleMedium)
+    var listOpen by remember { mutableStateOf(false) }
+    val trimmed = value.trim()
+    val valid = ACTION_NAME.matches(trimmed)
+    val badShape = trimmed.isNotEmpty() && !valid
+    // 打开就聚焦输入框（软键盘随之弹出），省掉一次点击。
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+    ModalOverlay(
+        onDismiss = onDismiss,
+        footer = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(onClick = { onAdd(trimmed) }, enabled = valid) { Text("加进清单") }
+            }
+        },
+    ) {
+        // ── 标题栏：标题 + 右上 ✕（点 ✕ / 点蒙层 / 返回键都能关）──
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "新增自定义动作",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "✕",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
         Text(
-            text = "这里写的是原样字符串（助手调用时用的名字），会逐字写进清单，不做翻译。",
+            text = "请输入系统动作的原始名称（区分大小写）。助手会严格按照此名称执行，不会自动翻译。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+
+        // ── 中间：输入框 + 右侧「查看可用动作」（窄屏时这一颗自己换行）──
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        ) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("动作名，例如 alarm.set") },
+                singleLine = true,
+                isError = badShape,
+                modifier = Modifier.weight(1f, fill = true).focusRequester(focus),
+            )
+            Box {
+                PilotSmallChip(onClick = { listOpen = true }) { Text("📋 查看可用动作") }
+                // 列表只用来**填入**，点一下就把名字写进输入框，不直接改任何配置。
+                DropdownMenu(expanded = listOpen, onDismissRequest = { listOpen = false }) {
+                    suggestions.distinct().forEach { raw ->
+                        val meaning = RulesDisplay.actionLabel(raw)
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        text = raw,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                                    )
+                                    if (meaning != raw) {
+                                        Text(
+                                            text = meaning,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                value = raw
+                                listOpen = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        if (badShape) {
+            Text(
+                text = ACTION_NAME_FORMAT_HINT,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            Text(
+                text = ACTION_NAME_SOURCE_NOTE,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        // ── 按场景给的小字（语义不同，不能混用）──
+        Text(
+            text = actionNameHint(context),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 10.dp),
+        )
+        // 二期的原说明原文（技术说法），三期起不再当主文案，但**一个字都没删**。
+        Text(
+            text = "这里写的是原样字符串（助手调用时用的名字），会逐字写进清单，不做翻译。",
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalPilotExtraColors.current.tertiaryText,
             modifier = Modifier.padding(top = 4.dp),
         )
-        OutlinedTextField(
-            value = value,
-            onValueChange = { value = it; error = null },
-            label = { Text("动作名，例如 alarm.set") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-        )
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(onClick = {
-                val raw = value.trim()
-                error = if (raw.isEmpty()) "写一个名字再点添加" else null
-                if (error == null) onAdd(raw)
-            }) { Text("加进清单") }
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
     }
 }
 
@@ -2234,6 +2617,7 @@ private fun TemplateDocumentEditor(
 ) {
     val templates = IntentTemplateCatalog.decodeTemplates(current)
     var draft by remember { mutableStateOf<TemplateDraft?>(null) }
+    var naming by remember { mutableStateOf(false) }
     Column {
         Text(
             "自定义动作 = 显示名字 + 内部名字（小写英文，助手调用时写它）+ 一条写死的 action（可点名组件）。" +
@@ -2261,7 +2645,25 @@ private fun TemplateDocumentEditor(
             Text("还没有自定义动作。", style = MaterialTheme.typography.bodySmall)
         }
         Spacer(modifier = Modifier.height(6.dp))
-        Button(onClick = { draft = TemplateDraft.blank() }) { Text("添加一条上屏动作") }
+        // 四期：先登记动作名（同一颗居中弹窗，小字按场景给不同的话），再进表单把这条补全。
+        // 名字这一步只是界面上的预填，真正的写入仍然只走下面表单那一条 onApply。
+        DashedActionButton(
+            onClick = { naming = true },
+            icon = "＋",
+            pill = true,
+        ) { Text("添加一条上屏动作") }
+    }
+    if (naming) {
+        AddActionOverlay(
+            // 场景二：自定义上屏动作 —— 这里只是登记，免不免问由免问清单那一项说了算。
+            context = ActionNameContext.USER_TEMPLATE,
+            suggestions = IntentTemplates.names + templates.map { it.id },
+            onDismiss = { naming = false },
+            onAdd = { raw ->
+                naming = false
+                draft = TemplateDraft.blank().copy(id = raw)
+            },
+        )
     }
     draft?.let { value ->
         TemplateFormDialog(
@@ -2313,6 +2715,7 @@ private fun PageDocumentEditor(
     draft?.let { value ->
         PageFormDialog(
             draft = value,
+            takenKeys = pages.map { it.key },
             onDismiss = { draft = null },
             onSave = { saved ->
                 val next = pages.filter { it.key != saved.key } + saved.toPage()
@@ -2574,36 +2977,246 @@ private fun TemplateFormDialog(
     )
 }
 
+/**
+ * 调用代号（= 配置中心说的"页面键"）的形状，**与后端同一把尺子**：
+ * `IntentTemplateCatalog.PAGE_KEY = [a-z][a-z0-9_]{1,30}`（小写字母开头，可含小写字母、数字与下划线）。
+ * 句点在这里是**不合法**的（页面键与动作名不是同一套语法），所以不跟着"动作名"那一条放宽。
+ */
+private val PAGE_KEY = Regex("[a-z][a-z0-9_]{1,30}")
+
+/** 系统动作指令的形状：`IntentTemplateCatalog.ACTION = [A-Za-z][A-Za-z0-9_.]{2,127}`。 */
+private val PAGE_ACTION = Regex("[A-Za-z][A-Za-z0-9_.]{2,127}")
+
+/**
+ * 内置 8 个设置页 → 它们真正在用的系统动作串。
+ *
+ * **值直接取框架常量**（`android.provider.Settings.ACTION_*`），与
+ * `DirectBackend.settingsAction(page)` 用的是同一批常量、同一套映射 —— 不是手抄的字符串，
+ * 所以不会与实现漂移，也不存在"编一个 action"的问题。
+ * （`settingsAction` 里 nfc 走的是 `else` 分支，这里按同一支对齐。）
+ *
+ * 仓库里没有这 8 个内置页的中文名（`IntentTemplates.settingsPages` 只有键），
+ * 所以列表上显示键本身，不自己编名字。
+ */
+private val BUILTIN_PAGE_PRESETS: List<Pair<String, String>> = listOf(
+    "wifi" to Settings.ACTION_WIFI_SETTINGS,
+    "bluetooth" to Settings.ACTION_BLUETOOTH_SETTINGS,
+    "display" to Settings.ACTION_DISPLAY_SETTINGS,
+    "location" to Settings.ACTION_LOCATION_SOURCE_SETTINGS,
+    "sound" to Settings.ACTION_SOUND_SETTINGS,
+    "apn" to Settings.ACTION_APN_SETTINGS,
+    "developer" to Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS,
+    "nfc" to Settings.ACTION_NFC_SETTINGS,
+)
+
+/**
+ * 预设选出来的建议调用代号：内置页那 8 个键在系统里已经被占用（重名会被配置中心拒），
+ * 所以给一个**确定不冲突**的建议值，用户可以随手改。
+ */
+private fun suggestPageKey(builtin: String, taken: Collection<String>): String {
+    val first = "my_$builtin"
+    if (first !in taken) return first
+    var n = 2
+    while ("my_$builtin$n" in taken) n++
+    return "my_$builtin$n"
+}
+
+/**
+ * 「添加 / 编辑设置页」弹窗（五期：改成与四期同一套居中弹窗 + 渐进式披露）。
+ *
+ * - **基础区只留两项**：调用代号 + 系统动作指令；显示名字与附加参数收进「高级选项 ▾」（默认收起），
+ *   所以只填两项就能保存；
+ * - **术语人话**：标题写"调用代号""系统动作指令"，机器话（页面键 / action）退到副文案里说；
+ * - **校验**：调用代号与动作串都按**后端同一把尺子**（[PAGE_KEY] / [PAGE_ACTION]）实时判，
+ *   再加一条"与内置 8 页重名"（后端也会拒）与"与已有条目重名"；任一项空或非法 ⇒ 保存变灰禁用；
+ * - **预设**：常用设置页列表，选中一次就把调用代号与系统动作指令一起填好（值来自框架常量）；
+ * - **形态**：与四期弹窗同一套（居中、400dp 上限、竖屏 24dp 边距、0.74 蒙层、
+ *   scale 0.9→1.0 + 淡入 200ms、✕ / 蒙层 / 返回键三条关闭路径、键盘避让）。
+ */
 @Composable
 private fun PageFormDialog(
     draft: PageDraft,
+    takenKeys: List<String>,
     onDismiss: () -> Unit,
     onSave: (PageDraft) -> Unit,
 ) {
     var value by remember { mutableStateOf(draft) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (draft.originalKey == null) "添加一个设置页" else "编辑设置页") },
-        text = {
-            Column {
-                FormField("页面键（小写英文，助手调用时写它）", value.key, { value = value.copy(key = it) })
-                FormField("显示名字", value.name, { value = value.copy(name = it) })
-                FormField("action（写死的动作串）", value.action, { value = value.copy(action = it) })
-                Text(
-                    "参数（可选，一行一条 key=值）",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedTextField(
-                    value = value.extras,
-                    onValueChange = { value = value.copy(extras = it) },
-                    singleLine = false,
-                    modifier = Modifier.fillMaxWidth().height(100.dp),
-                )
+    var advanced by remember { mutableStateOf(false) }
+    var presetsOpen by remember { mutableStateOf(false) }
+    val isNew = draft.originalKey == null
+    val key = value.key.trim()
+    val action = value.action.trim()
+    val keyShapeOk = PAGE_KEY.matches(key)
+    // 后端两条会拒的规则，提前在弹窗里说清：与内置 8 页重名、与已有条目重名（编辑自己那条不算）。
+    val keyTaken = key.isNotEmpty() && (
+        key in IntentTemplates.settingsPages ||
+            (key in takenKeys && key != draft.originalKey)
+        )
+    val actionOk = PAGE_ACTION.matches(action)
+    val canSave = keyShapeOk && !keyTaken && actionOk
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+    ModalOverlay(
+        onDismiss = onDismiss,
+        footer = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 「取消」是次要动作：普通文字按钮、次要色，不与主操作抢。
+                TextButton(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    ),
+                ) { Text("取消") }
+                Spacer(modifier = Modifier.width(8.dp))
+                // 主操作：实心主色按钮；必填项空或非法时禁用变灰。
+                Button(onClick = { onSave(value) }, enabled = canSave) { Text("保存这一个") }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(value) }) { Text("保存这一个") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (isNew) "添加一个设置页" else "编辑设置页",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "✕",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+        // 安全提示：这一项填错不是"没生效"，而是会真去点系统。
+        Text(
+            text = "⚠️ 此动作会直接控制系统。填错可能导致助手执行失败或跳出异常窗口。",
+            style = MaterialTheme.typography.bodySmall,
+            color = warningInk(),
+            modifier = Modifier.padding(top = 8.dp),
+        )
+
+        // ── 基础区：只留两项，填完就能保存 ──
+        OutlinedTextField(
+            value = value.key,
+            onValueChange = { value = value.copy(key = it) },
+            label = { Text("调用代号（必填）") },
+            supportingText = {
+                Text(
+                    text = when {
+                        key.isNotEmpty() && !keyShapeOk ->
+                            "调用代号只能用英文小写字母、数字和下划线，并以小写字母开头。"
+                        keyTaken && key in IntentTemplates.settingsPages ->
+                            "这个调用代号已经被内置页面占用了，重名会被拒。"
+                        keyTaken -> "这个调用代号已经有一条了，重名会被拒。"
+                        else -> "小写英文，助手调用时使用"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            },
+            isError = key.isNotEmpty() && (keyTaken || !keyShapeOk),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp).focusRequester(focus),
+        )
+        OutlinedTextField(
+            value = value.action,
+            onValueChange = { value = value.copy(action = it) },
+            label = { Text("系统动作指令（必填）") },
+            supportingText = {
+                Text(
+                    text = if (action.isNotEmpty() && !actionOk) {
+                        "动作串要以英文字母开头，只能含英文字母、数字、点和下划线。"
+                    } else {
+                        "系统底层命令，需从系统里抄"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            },
+            isError = action.isNotEmpty() && !actionOk,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        )
+
+        // ── 预设：只把"确证过"的 8 个内置页动作串摆出来，点一次填好两项 ──
+        Box(modifier = Modifier.padding(top = 8.dp)) {
+            PilotSmallChip(onClick = { presetsOpen = true }) { Text("📋 常用设置页") }
+            DropdownMenu(expanded = presetsOpen, onDismissRequest = { presetsOpen = false }) {
+                BUILTIN_PAGE_PRESETS.forEach { (builtin, action) ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text("内置页 $builtin", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = action,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                        onClick = {
+                            presetsOpen = false
+                            // 编辑时不动调用代号（那是这一条的身份）；新增时给一个不冲突的建议值。
+                            value = value.copy(
+                                key = if (isNew) suggestPageKey(builtin, takenKeys) else value.key,
+                                action = action,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+        Text(
+            text = "预设的动作串就是内置这 8 个设置页在用的那一串（与实现同一批系统常量）；" +
+                "别的页面必须自己从系统里抄，助手不会替你猜。" +
+                if (isNew) "调用代号默认填一个不与内置页冲突的名，可以改。" else "编辑时不会动你的调用代号。",
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalPilotExtraColors.current.tertiaryText,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+
+        // ── 高级选项（默认收起）：显示名字 + 附加参数 ──
+        SectionToggle(
+            label = "高级选项",
+            open = advanced,
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        ) { advanced = !advanced }
+        if (advanced) {
+            OutlinedTextField(
+                value = value.name,
+                onValueChange = { value = value.copy(name = it) },
+                label = { Text("显示名字") },
+                supportingText = {
+                    Text("留空就用调用代号当名字。", style = MaterialTheme.typography.labelSmall)
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "附加参数（可选）",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            OutlinedTextField(
+                value = value.extras,
+                onValueChange = { value = value.copy(extras = it) },
+                placeholder = { Text("键=值，一行一条") },
+                supportingText = {
+                    Text(
+                        text = "键名只能是字母/数字/下划线/点；值的形状决定类型：" +
+                            "true/false 当开关、整数当数字、其余当文本。最多 16 条。",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                },
+                singleLine = false,
+                modifier = Modifier.fillMaxWidth().height(96.dp),
+            )
+        }
+    }
 }
 
 @Composable

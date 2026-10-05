@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -20,19 +21,24 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -365,6 +371,85 @@ fun PilotNote(text: String, modifier: Modifier = Modifier) {
         lineHeight = 20.sp,
         modifier = modifier.padding(vertical = 6.dp),
     )
+}
+
+/**
+ * 虚线框按钮（三期新增）：整块可点、四周一圈虚线，里面是"图标 + 文字"。
+ *
+ * 用途是**"试一下 / 加一条"这类软动作**：它不该和卡片里那些真改配置的按钮长成一个样子，
+ * 所以刻意用虚线框而不是实心按钮 —— 一眼能看出"这不是写入动作"。
+ * 文字色由这里统一给主色（调用方只写 `Text("…")`，不带颜色参数）。
+ */
+@Composable
+fun DashedActionButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: String? = null,
+    pill: Boolean = false,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    val line = MaterialTheme.colorScheme.outline
+    val shape = if (pill) RoundedCornerShape(999.dp) else RoundedCornerShape(12.dp)
+    val radius = if (pill) 999.dp else 12.dp
+    val stroke = 1.dp
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(accent.copy(alpha = 0.04f))
+            .clickable(onClick = onClick)
+            .drawBehind {
+                // 虚线按当前尺寸现画：框会跟着文字换行自动长高，不需要固定高度。
+                val w = stroke.toPx()
+                val inset = w / 2f
+                drawRoundRect(
+                    color = line,
+                    topLeft = Offset(inset, inset),
+                    size = Size(
+                        (size.width - w).coerceAtLeast(0f),
+                        (size.height - w).coerceAtLeast(0f),
+                    ),
+                    cornerRadius = CornerRadius(
+                        radius.toPx().coerceAtMost(size.minDimension / 2f),
+                    ),
+                    style = Stroke(
+                        width = w,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f),
+                    ),
+                )
+            }
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        if (icon != null) {
+            Text(text = icon, style = MaterialTheme.typography.labelLarge, color = accent)
+            Spacer(modifier = Modifier.width(6.dp))
+        }
+        CompositionLocalProvider(LocalContentColor provides accent) { content() }
+    }
+}
+
+/**
+ * 小胶囊按钮（三期新增）：与标签同款形状，一行里排得下好几枚，窄屏可换行。
+ * 内容色沿用所在容器（卡片正文色），调用方按需要给 `Text(..., color = …)`。
+ */
+@Composable
+fun PilotSmallChip(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(999.dp)
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) { content() }
 }
 
 @Composable
